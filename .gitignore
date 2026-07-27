@@ -10,7 +10,8 @@
 *_local
 
 *.mp4
-
+*.pdf
+*.txt
 gmt_history
 # Julia artifacts
 
