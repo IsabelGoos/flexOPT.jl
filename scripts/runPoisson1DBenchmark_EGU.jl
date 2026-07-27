@@ -76,7 +76,7 @@ end
 
 function benchmark_configurations()
     configs = [
-        # Conventional one-point Taylor expansions: useful references.
+        # Conventional boxcar references. FD3 is always retained as baseline.
         configuration(
             "FD3", 3;
             order_b_space=-1,
@@ -85,6 +85,16 @@ function benchmark_configurations()
             field_offset=1.0,
             material_points=1,
             material_offset=1.0,
+            interpolation_order=-1,
+        ),
+        configuration(
+            "FD4", 4;
+            order_b_space=-1,
+            supplementary_order=0,
+            field_points=1,
+            field_offset=1.5,
+            material_points=1,
+            material_offset=1.5,
             interpolation_order=-1,
         ),
         configuration(
@@ -98,18 +108,20 @@ function benchmark_configurations()
             interpolation_order=-1,
         ),
 
-        # Interpolated Taylor expansions (manuscript equation 18). Comparing
-        # supplementary orders 0 and 2 isolates the underdetermined Taylor
-        # reconstruction from the effect of the four-point trial stencil.
-        configuration("OPT3-Y1-sup2", 3; supplementary_order=2),
-        configuration("OPT4-Y1-sup0", 4; supplementary_order=0),
-        configuration("OPT4-Y1-sup2", 4; supplementary_order=2),
-        configuration("OPT5-Y1-sup2", 5; supplementary_order=2),
-
-        # Staggered material Taylor centres. A negative half-cell margin gives
-        # centres 0.5, 1.5, ..., N+0.5 while field centres remain on nodes.
+        # Proven seismic-style OPT3 baseline: hat W and one central expansion.
         configuration(
-            "OPT3-Y1-sup2-material-half-shift", 3;
+            "OPT3-normal", 3;
+            supplementary_order=2,
+            field_points=1,
+            field_offset=1.0,
+            material_points=1,
+            material_offset=1.0,
+            interpolation_order=-1,
+        ),
+
+        # Equation-(18) interpolation variants.
+        configuration(
+            "OPT3-staggered", 3;
             supplementary_order=2,
             field_points=3,
             field_offset=0.0,
@@ -117,8 +129,20 @@ function benchmark_configurations()
             material_offset=-0.5,
             interpolation_order=1,
         ),
+        # Five μ centres over the unchanged three-node trial stencil:
+        # 1, 1.5, 2, 2.5, 3.
         configuration(
-            "OPT4-Y1-sup2-material-half-shift", 4;
+            "OPT3-dense-mu5", 3;
+            supplementary_order=2,
+            field_points=5,
+            field_offset=0.0,
+            material_points=5,
+            material_offset=0.0,
+            interpolation_order=1,
+        ),
+        configuration("OPT4-collocated", 4; supplementary_order=2),
+        configuration(
+            "OPT4-staggered", 4;
             supplementary_order=2,
             field_points=4,
             field_offset=0.0,
@@ -126,8 +150,9 @@ function benchmark_configurations()
             material_offset=-0.5,
             interpolation_order=1,
         ),
+        configuration("OPT5-collocated", 5; supplementary_order=2),
         configuration(
-            "OPT5-Y1-sup2-material-half-shift", 5;
+            "OPT5-staggered", 5;
             supplementary_order=2,
             field_points=5,
             field_offset=0.0,
@@ -223,6 +248,21 @@ function solve_poisson(recipe, grid_data, config)
     prepared.NForceField == 1 || error("Expected one force field, got $(prepared.NForceField)")
     prepared.timePointsUsedForOneStep == 1 ||
         error("Static Poisson recipe unexpectedly uses time marching")
+    hasproperty(prepared, :R_force) ||
+        error("The prepared system does not expose the manuscript Γ source operator")
+    expected_gamma_size = (grid_data.nx, grid_data.nx)
+    size(prepared.R_force) == expected_gamma_size ||
+        error("Unexpected Γ dimensions $(size(prepared.R_force)); expected $expected_gamma_size")
+
+    # OPT must redistribute the external source through Γ (manuscript eq. 55).
+    # Guard against accidentally replacing Γ*f by the pointwise source vector.
+    if startswith(config.name, "OPT")
+        gamma_off_diagonal = copy(prepared.R_force)
+        gamma_off_diagonal -= spdiagm(0 => diag(prepared.R_force))
+        dropzeros!(gamma_off_diagonal)
+        nnz(gamma_off_diagonal) > 0 ||
+            error("OPT source operator Γ is diagonal; source redistribution was lost")
+    end
 
     known_inputs = vcat(
         vec(prepared.known_lhs_template),
@@ -317,7 +357,12 @@ function main()
     ]
     errors = fill(NaN, length(log_h_inverse), length(cases), length(configs))
 
-    Threads.@threads for job_index in eachindex(jobs)
+    # numericalOperatorConstruction compiles Symbolics runtime functions whose
+    # generated material symbols are not thread-local. Concurrent construction
+    # has been observed to cross-contaminate jobs (for example, κ₂ leaking into
+    # a one-material Poisson operator), producing non-reproducible errors.
+    # Keep assembly and solves serial until that compiler path is made thread-safe.
+    for job_index in eachindex(jobs)
         job = jobs[job_index]
         case = cases[job.case_index]
         config = configs[job.config_index]
