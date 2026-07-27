@@ -47,6 +47,7 @@ function configuration(
     field_interpolation_order=interpolation_order,
     material_interpolation_order=interpolation_order,
     taylor_inverse_mode=:scaled_svd,
+    trial_function_ref_points=nothing,
 )
     return (
         name=name,
@@ -58,6 +59,7 @@ function configuration(
         fieldItpl=interpolation(field_points, field_offset, field_interpolation_order),
         materItpl=interpolation(material_points, material_offset, material_interpolation_order),
         taylorInverseMode=taylor_inverse_mode,
+        trialFunctionRefPoints=trial_function_ref_points,
     )
 end
 
@@ -66,6 +68,43 @@ function configurations()
         configuration("FD3", 3),
         configuration("FD4-half", 4),
         configuration("FD5", 5),
+        configuration(
+            "OPT5-box", 5;
+            order_b=-1, supplementary_order=2,
+            field_offset=2.0, material_offset=2.0,
+        ),
+        configuration(
+            "OPT5-ordinary-hat-supp0", 5;
+            order_b=1, supplementary_order=0,
+            field_offset=2.0, material_offset=2.0,
+        ),
+        configuration(
+            "OPT5-wide-hat-1-to-5-supp0", 5;
+            order_b=1, supplementary_order=0,
+            field_offset=2.0, material_offset=2.0,
+            trial_function_ref_points=[1, 3, 5],
+        ),
+        configuration(
+            "OPT5-cubic-supp0", 5;
+            order_b=3, supplementary_order=0,
+            field_offset=2.0, material_offset=2.0,
+        ),
+        configuration(
+            "OPT5-wide-hat-1-to-5-supp2", 5;
+            order_b=1, supplementary_order=2,
+            field_offset=2.0, material_offset=2.0,
+            trial_function_ref_points=[1, 3, 5],
+        ),
+        configuration(
+            "OPT5-ordinary-hat-supp2-requested", 5;
+            order_b=1, supplementary_order=2,
+            field_offset=2.0, material_offset=2.0,
+        ),
+        configuration(
+            "OPT5-cubic-supp2-requested", 5;
+            order_b=3, supplementary_order=2,
+            field_offset=2.0, material_offset=2.0,
+        ),
         configuration("OPT3-normal", 3; order_b=1, supplementary_order=2),
         configuration(
             "OPT3-staggered", 3;
@@ -229,6 +268,7 @@ function make_recipe(config)
         "materItpl" => config.materItpl,
         "nuGeometryMode" => :middle,
         "taylorInverseMode" => config.taylorInverseMode,
+        "trialFunctionRefPoints" => config.trialFunctionRefPoints,
         "recipe_backend" => CPU(),
     ))["recette"]
 end
@@ -295,7 +335,8 @@ function analyse(config; maximum_order=12, tolerance=1e-10)
 end
 
 function main()
-    results = [analyse(config) for config in configurations()]
+    selected = filter(config -> !occursin("wide-hat", config.name), configurations())
+    results = [analyse(config) for config in selected]
     return results
 end
 

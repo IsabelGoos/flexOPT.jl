@@ -103,9 +103,6 @@ function integrateTaylorPolynomials(eq, x; simplify_expr=mySimplify)
     highestOrder < 0 && return zero(num)
 
     # constant term
-    # Recover the constant term without substitution. SymbolicUtils currently
-    # fails to substitute x = 0 in some higher-order B-spline expressions, and
-    # `x^0` may simplify to a plain number before reaching `coeff`.
     constant_term = num
     for i in 1:highestOrder
         constant_term -= Symbolics.coeff(num, x^i) * x^i

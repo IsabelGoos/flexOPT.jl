@@ -40,7 +40,9 @@ end
 
 
 function continuousAntiDerivativesMaker!(csf::CompactSymbolicFunctions)
-    allNodes = Symbolics.value.(csf.nodes)
+    # Floating knot multipliers avoid a SymbolicUtils conversion failure when
+    # substituting symbolic endpoints such as 1*Δx.
+    allNodes = Float64.(Symbolics.value.(csf.nodes))
     numberNodes = csf.numberNodes
     x = csf.variables[1]
     Δx = csf.variables[2]

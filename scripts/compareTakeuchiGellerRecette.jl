@@ -47,27 +47,45 @@ interpolation(offset) = (
     YorderBtime=-1,
 )
 
-function opt3_parameters(equation, spacings, supplementary_order)
+function recipe_parameters(
+    equation,
+    spacings,
+    supplementary_order;
+    points_in_space=3,
+)
     return Dict{String,Any}(
         "famousEquationType" => equation,
         "Δ" => spacings,
         "orderBtime" => 1,
         "orderBspace" => 1,
-        "pointsInSpace" => 3,
+        "pointsInSpace" => points_in_space,
         "pointsInTime" => 3,
         "supplementaryOrder" => supplementary_order,
-        "fieldItpl" => interpolation(1.0),
-        "materItpl" => interpolation(1.0),
+        "fieldItpl" => interpolation((points_in_space - 1) / 2),
+        "materItpl" => interpolation((points_in_space - 1) / 2),
         "nuGeometryMode" => :middle,
         "recipe_backend" => CPU(),
     )
 end
 
-function generated_recipe(equation, spacings; supplementary_order=2)
-    key = (equation, (Tuple(spacings)..., supplementary_order))
+function generated_recipe(
+    equation,
+    spacings;
+    supplementary_order=2,
+    points_in_space=3,
+)
+    key = (
+        equation,
+        (Tuple(spacings)..., supplementary_order, points_in_space),
+    )
     return get!(RECIPE_CACHE, key) do
         construct = () -> makeOPTsemiSymbolic(
-            opt3_parameters(equation, spacings, supplementary_order),
+            recipe_parameters(
+                equation,
+                spacings,
+                supplementary_order;
+                points_in_space,
+            ),
         )["recette"]
         if VERBOSE_GENERATOR
             construct()
@@ -82,12 +100,19 @@ end
 function material_value(symbol, values)
     name = string(symbol)
     occursin("ρ", name) && return values.rho
+    occursin("λ", name) && return values.lambda
     occursin("μ", name) && return values.mu
     occursin("v", name) && return values.velocity
     error("No material substitution was supplied for flexOPT symbol $name")
 end
 
-function numerical_coefficients(recipe, values; scale=1.0)
+function numerical_coefficients(
+    recipe,
+    values;
+    equation_index=1,
+    field_index=1,
+    scale=1.0,
+)
     replacements = Dict{Any,Any}()
     for symbol in vec(recipe.lhs.varM)
         raw_symbol = symbol isa Num ? symbol[] : symbol
@@ -95,7 +120,12 @@ function numerical_coefficients(recipe, values; scale=1.0)
     end
 
     geometry = 1
-    symbolic = recipe.lhs.Ajiννᶜ[:, 1, 1, geometry]
+    symbolic = recipe.lhs.Ajiννᶜ[
+        :,
+        equation_index,
+        field_index,
+        geometry,
+    ]
     coefficients = Float64[
         scale * Num2Float64(Symbolics.substitute(value, replacements))
         for value in symbolic
@@ -144,6 +174,66 @@ function paper_2000_components(delta_x, delta_z, delta_t)
     return (; rho=rho_coefficients, mu=mu_coefficients)
 end
 
+function paper_2000_psv_components(delta_x, delta_z, delta_t)
+    offsets = collect(Iterators.product(-1:2, -1:2, -1:1))
+    zero_stencil() = Dict(offset => 0.0 for offset in offsets)
+
+    smoothing = Dict(-1 => 1.0, 0 => 10.0, 1 => 1.0)
+    second = Dict(-1 => 1.0, 0 => -2.0, 1 => 1.0)
+    # Eq. (52): [-5, -3, 9, -1]/12 at offsets [-1, 0, 1, 2].
+    first = Dict(-1 => -5.0, 0 => -3.0, 1 => 9.0, 2 => -1.0)
+
+    mass = zero_stencil()
+    stiffness_x = zero_stencil()
+    stiffness_z = zero_stencil()
+    mixed = zero_stencil()
+    for offset in offsets
+        x, z, t = offset
+        if haskey(smoothing, x) && haskey(smoothing, z)
+            mass[offset] =
+                smoothing[x] * smoothing[z] * second[t] /
+                (144 * delta_t^2)
+            stiffness_x[offset] =
+                second[x] * smoothing[z] * smoothing[t] /
+                (144 * delta_x^2)
+            stiffness_z[offset] =
+                smoothing[x] * second[z] * smoothing[t] /
+                (144 * delta_z^2)
+        end
+        mixed[offset] =
+            first[x] * first[z] * smoothing[t] /
+            (1728 * delta_x * delta_z)
+    end
+
+    linear_combination(terms...) = Dict(
+        offset => sum(weight * stencil[offset] for (weight, stencil) in terms)
+        for offset in offsets
+    )
+    zeros = zero_stencil()
+    return Dict(
+        (1, 1) => (
+            rho=mass,
+            lambda=linear_combination((-1.0, stiffness_x)),
+            mu=linear_combination((-2.0, stiffness_x), (-1.0, stiffness_z)),
+        ),
+        (1, 2) => (
+            rho=zeros,
+            lambda=linear_combination((-1.0, mixed)),
+            mu=linear_combination((-1.0, mixed)),
+        ),
+        (2, 1) => (
+            rho=zeros,
+            lambda=linear_combination((-1.0, mixed)),
+            mu=linear_combination((-1.0, mixed)),
+        ),
+        (2, 2) => (
+            rho=mass,
+            lambda=linear_combination((-1.0, stiffness_z)),
+            mu=linear_combination((-1.0, stiffness_x), (-2.0, stiffness_z)),
+        ),
+    )
+end
+
 function combine_components(components, rho, mu)
     return Dict(
         offset => rho * components.rho[offset] + mu * components.mu[offset]
@@ -155,6 +245,16 @@ function subtract_coefficients(left, right)
     Set(keys(left)) == Set(keys(right)) ||
         error("Cannot subtract different stencil supports")
     return Dict(offset => left[offset] - right[offset] for offset in keys(left))
+end
+
+function combine_elastic_components(components, rho, lambda, mu)
+    return Dict(
+        offset =>
+            rho * components.rho[offset] +
+            lambda * components.lambda[offset] +
+            mu * components.mu[offset]
+        for offset in keys(components.rho)
+    )
 end
 
 function compare_coefficients(
@@ -325,6 +425,84 @@ function validate_2000(delta_x, delta_z, delta_t, rho, mu)
     )
 end
 
+function validate_2000_psv(
+    delta_x,
+    delta_z,
+    delta_t,
+    rho,
+    lambda,
+    mu,
+)
+    delta_x == delta_z == delta_t || error(
+        "The current P-SV comparison uses one common grid scale; " *
+        "got Δx=$delta_x, Δz=$delta_z, and Δt=$delta_t",
+    )
+    recipe = generated_recipe(
+        "2DsismoTimeIsoHomo",
+        (delta_x, delta_z, delta_t);
+        points_in_space=4,
+        supplementary_order=2,
+    )
+    physical_scale = inv(delta_x^3)
+    published_blocks = paper_2000_psv_components(
+        delta_x,
+        delta_z,
+        delta_t,
+    )
+
+    basis_values = (
+        rho=(rho=1.0, lambda=0.0, mu=0.0, velocity=0.0),
+        lambda=(rho=0.0, lambda=1.0, mu=0.0, velocity=0.0),
+        mu=(rho=0.0, lambda=0.0, mu=1.0, velocity=0.0),
+    )
+    # The paper deliberately mixes supports: diagonal P-SV blocks use the
+    # three-point Eqs. (23)-(25), already validated above, while only the
+    # off-diagonal mixed derivatives use the four-point Eq. (54). Since
+    # flexOPT currently selects pointsInSpace globally per recette, compare
+    # Eq. (54) on its two off-diagonal blocks here.
+    for (equation_index, field_index) in ((1, 2), (2, 1))
+        block = (equation_index, field_index)
+        generated = (
+            rho=numerical_coefficients(
+                recipe,
+                basis_values.rho;
+                equation_index,
+                field_index,
+                scale=physical_scale,
+            ),
+            lambda=numerical_coefficients(
+                recipe,
+                basis_values.lambda;
+                equation_index,
+                field_index,
+                scale=physical_scale,
+            ),
+            mu=numerical_coefficients(
+                recipe,
+                basis_values.mu;
+                equation_index,
+                field_index,
+                scale=physical_scale,
+            ),
+        )
+        published = published_blocks[block]
+        for component in (:rho, :lambda, :mu)
+            compare_coefficients(
+                "2000 P-SV[$equation_index,$field_index] $component",
+                getproperty(generated, component),
+                getproperty(published, component);
+                print_table=PRINT_TABLES,
+            )
+        end
+        compare_coefficients(
+            "2000 P-SV[$equation_index,$field_index] combined",
+            combine_elastic_components(generated, rho, lambda, mu),
+            combine_elastic_components(published, rho, lambda, mu),
+        )
+    end
+    return nothing
+end
+
 function main()
     println("Takeuchi-Geller local-recette validation")
     println(
@@ -333,10 +511,10 @@ function main()
     )
 
     material_pairs = QUICK ? (
-        (rho=1.0, mu=1.0),
+        (rho=1.0, lambda=1.0, mu=1.0),
     ) : (
-        (rho=1.0, mu=1.0),
-        (rho=2.7, mu=31.0),
+        (rho=1.0, lambda=1.0, mu=1.0),
+        (rho=2.7, lambda=20.0, mu=31.0),
     )
     spacing_pairs_1d = QUICK ? (
         (delta_x=1.0, delta_t=1.0),
@@ -352,7 +530,12 @@ function main()
     )
 
     for material in material_pairs
-        @printf("ρ = %.6g, μ = %.6g\n", material.rho, material.mu)
+        @printf(
+            "ρ = %.6g, λ = %.6g, μ = %.6g\n",
+            material.rho,
+            material.lambda,
+            material.mu,
+        )
         for spacing in spacing_pairs_1d
             validate_1998(
                 spacing.delta_x,
@@ -367,6 +550,14 @@ function main()
                 spacing.delta_z,
                 spacing.delta_t,
                 material.rho,
+                material.mu,
+            )
+            validate_2000_psv(
+                spacing.delta_x,
+                spacing.delta_z,
+                spacing.delta_t,
+                material.rho,
+                material.lambda,
                 material.mu,
             )
         end

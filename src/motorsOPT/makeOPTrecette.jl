@@ -46,6 +46,7 @@ function makeOPTsemiSymbolic(params::Dict)
     recipe_backend = _normalise_recipe_backend(_opt_paramget(params, :recipe_backend, _opt_paramget(params, :coefficient_backend, :auto)))
     nuGeometryMode = Symbol(_opt_paramget(params, :nuGeometryMode, :middle))
     taylorInverseMode = Symbol(_opt_paramget(params, :taylorInverseMode, :scaled_svd))
+    trialFunctionRefPoints = _opt_paramget(params, :trialFunctionRefPoints, nothing)
     nuGeometryMode in (:middle, :all) ||
         throw(ArgumentError("nuGeometryMode must be :middle or :all"))
     Δnum = SVector(Δ)
@@ -69,7 +70,7 @@ function makeOPTsemiSymbolic(params::Dict)
     _,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ=investigateDependencies(equationCharacteristics,numbersOfTheSystem,trialFunctionsCharacteristics,TaylorOptionsμ,TaylorOptionsμᶜ)
     bigα,varM,CartesianDependencies=bigαFinder(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ)
 
-    Ajiννᶜ,Ulocal,Cˡη=constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM; recipe_backend=recipe_backend, taylor_inverse_mode=taylorInverseMode)
+    Ajiννᶜ,Ulocal,Cˡη=constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM; recipe_backend=recipe_backend, taylor_inverse_mode=taylorInverseMode, trial_function_ref_points=trialFunctionRefPoints)
     lhs=(Ajiννᶜ=Ajiννᶜ,Ulocal=Ulocal,varM=varM,CartesianDependencies=CartesianDependencies)
 
     # compact coefficients for r.h.s. of the equation
@@ -78,7 +79,7 @@ function makeOPTsemiSymbolic(params::Dict)
     numbersOfTheSystem = numbersOfTheSystemR
     _,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ=investigateDependencies(equationCharacteristics,numbersOfTheSystem,trialFunctionsCharacteristics,TaylorOptionsμ,TaylorOptionsμᶜ)
     bigα,varM,CartesianDependencies=bigαFinder(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ)
-    Γjiννᶜ,Flocal,CˡηForce =constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM; recipe_backend=recipe_backend, taylor_inverse_mode=taylorInverseMode)
+    Γjiννᶜ,Flocal,CˡηForce =constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM; recipe_backend=recipe_backend, taylor_inverse_mode=taylorInverseMode, trial_function_ref_points=trialFunctionRefPoints)
     rhs=(Γjiννᶜ=Γjiννᶜ,Flocal=Flocal,varF=varM,CartesianDependencies=CartesianDependencies)
 
     #
@@ -97,7 +98,7 @@ function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSp
     return constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμ,configsTaylorμ,Δnum,bigα,varM;ImakeReport=ImakeReport, recipe_backend=recipe_backend, taylor_inverse_mode=taylor_inverse_mode)
 end
 
-function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend, taylor_inverse_mode=:scaled_svd)
+function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend, taylor_inverse_mode=:scaled_svd, trial_function_ref_points=nothing)
     numberGeometries = configsTaylorμ.numberGeometries
     numberGeometries == configsTaylorμᶜ.numberGeometries ||
         throw(ArgumentError("field and material Taylor grids must expose the same ν geometries"))
@@ -123,6 +124,7 @@ function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSp
             Δnum, bigα, varM;
             ImakeReport=ImakeReport, recipe_backend=recipe_backend,
             taylor_inverse_mode=taylor_inverse_mode,
+            trial_function_ref_points=trial_function_ref_points,
         )
     end
 
@@ -130,7 +132,7 @@ function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSp
     return Ajiννᶜ, results[1][2], results[1][3]
 end
 
-function _constructAmatrix_single(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend, taylor_inverse_mode=:scaled_svd)
+function _constructAmatrix_single(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend, taylor_inverse_mode=:scaled_svd, trial_function_ref_points=nothing)
     
     # for the future develpments: ν can move but it's already more or less coded! look at pointν and nGeometry
 
@@ -185,7 +187,8 @@ function _constructAmatrix_single(equationCharacteristics,numbersOfTheSystem,ord
         ν = (pointν[iCoord]) # this should be one point (for the moment)
         lᶜ_nᶜ_max = L_MINUS_N[end][iCoord] # variable
         l_n_max = L_MINUS_N[end][iCoord] # field
-        params = (orderBspline1D=orderBspline[iCoord], YorderBspline1Dμᶜ=YorderBsplineμᶜ[iCoord], YorderBspline1Dμ=YorderBsplineμ[iCoord], μᶜs=μᶜaxes[iCoord], μs=μaxes[iCoord], maxNode = pointsIndices[end][iCoord], ν =(pointν[iCoord]), lᶜ_nᶜ_max=lᶜ_nᶜ_max, l_n_max=l_n_max,  Δ=Δnum[iCoord],ImakeReport=ImakeReport)
+        νRefPoints = trial_function_ref_points === nothing ? collect(1:maxNodes) : trial_function_ref_points
+        params = (orderBspline1D=orderBspline[iCoord], YorderBspline1Dμᶜ=YorderBsplineμᶜ[iCoord], YorderBspline1Dμ=YorderBsplineμ[iCoord], μᶜs=μᶜaxes[iCoord], μs=μaxes[iCoord], maxNode = pointsIndices[end][iCoord], ν =(pointν[iCoord]), νRefPoints=νRefPoints, lᶜ_nᶜ_max=lᶜ_nᶜ_max, l_n_max=l_n_max,  Δ=Δnum[iCoord],ImakeReport=ImakeReport)
         coefWYYKK[iCoord] = WYYKKIntegralNumerical(params) 
     end
 
