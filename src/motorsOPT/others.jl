@@ -423,22 +423,30 @@ function _investigateDependencies(::Val{N},
     centrePointConfigurations = Int[]
 
 
-    # in order to propose other middle points, we need to make a loop below
+    # ---------------- Candidate positions of ν ----------------
 
-    numberGeometries = 1
+    tmpVec = ((car2vec(multiPointsIndices[end]) .- 1) .÷ 2) .+ 1
+    if timeMarching && car2vec(multiPointsIndices[end])[end] > 1
+        tmpVec[end] = car2vec(multiPointsIndices[end])[end] - 1
+    end
+    middleν = vec2car(tmpVec)
+    nuGeometryMode = hasproperty(trialFunctionsCharacteristics, :nuGeometryMode) ?
+        trialFunctionsCharacteristics.nuGeometryMode : :middle
 
-    for i in 1:numberGeometries
-
-        # ---------------- Middle point ----------------
-    
-
-        tmpVec = ((car2vec(multiPointsIndices[end]) .- 1) .÷ 2) .+ 1
-
-        if timeMarching && car2vec(multiPointsIndices[end])[end] > 1
-            tmpVec[end] = car2vec(multiPointsIndices[end])[end] - 1
+    candidateCentres = if nuGeometryMode == :all
+        if timeMarching
+            # Move ν through every spatial position, while retaining the
+            # established time level used to define one marching step.
+            [I for I in multiPointsIndices if I[end] == middleν[end]]
+        else
+            collect(multiPointsIndices)
         end
+    else
+        [middleν]
+    end
+    numberGeometries = length(candidateCentres)
 
-        middleν = vec2car(tmpVec)
+    for middleν in candidateCentres
 
         push!(availablePointsConfigurations, car2svec.(multiPointsIndices))
         push!(centrePointConfigurations,

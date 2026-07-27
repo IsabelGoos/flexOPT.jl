@@ -869,10 +869,6 @@ function prepareNumericalOperatorGeometry(optRec, modelFam,side; absorbingBounda
 
     #region 
 
-    # Preferred geometry at each spatial point.
-    # Later this can be filled from a table or a classifier.
-    geometryPreference = fill(1, Tuple(wholeRegionPointsSpace))
-
     spacePointsUsed=Vector{Any}(undef, nGeometry)
     timePointsUsedForOneStep=Vector{Any}(undef, nGeometry)
     for iGeometry ∈ 1:nGeometry
@@ -881,8 +877,34 @@ function prepareNumericalOperatorGeometry(optRec, modelFam,side; absorbingBounda
         timePointsUsedForOneStep[iGeometry] = localPointVecs[end][end]
     end
 
-    # For now, all points use geometry 1, so this is the active time depth.
+    # Every moving-ν geometry has the same time depth.
     activeTimePoints = timePointsUsedForOneStep[1]
+
+    # Prefer the historical middle ν in the interior, then move ν just far
+    # enough inward for the complete local stencil to remain in the domain.
+    # The geometry index is a single extra lookup dimension, so this remains
+    # compatible with the existing CPU/GPU contraction and with 2D--4D grids.
+    geometryPreference = fill(1, Tuple(wholeRegionPointsSpace))
+    if nGeometry > 1
+        geometryByCentre = Dict(
+            Tuple(middlepoints[iGeometry][1:end-1]) => iGeometry
+            for iGeometry in 1:nGeometry
+        )
+        stencilSize = collect(localPointsIndices[1][end][1:end-1])
+        preferredCentre = ((stencilSize .- 1) .÷ 2) .+ 1
+        if timeMarching && localPointsIndices[1][end][end] > 1
+            # Only spatial ν moves; candidate generation fixes the time level.
+            preferredCentre = collect(preferredCentre)
+        end
+
+        for point in CartesianIndices(Tuple(wholeRegionPointsSpace))
+            globalPoint = collect(Tuple(point))
+            lower = max.(1, globalPoint .+ stencilSize .- collect(wholeRegionPointsSpace))
+            upper = min.(stencilSize, globalPoint)
+            selectedCentre = clamp.(preferredCentre, lower, upper)
+            geometryPreference[point] = geometryByCentre[Tuple(selectedCentre)]
+        end
+    end
 
    
 
@@ -916,8 +938,6 @@ function prepareNumericalOperatorGeometry(optRec, modelFam,side; absorbingBounda
         iGeometry = geometryPreference[νtmpWhole]
         νGeometry[iPoint] = iGeometry
 
-        # For now take the first centre of that geometry.
-        # Later this can be refined if one point wants another centre within the same geometry.
         νRelative[iPoint] = middlepoints[iGeometry]
     end
 

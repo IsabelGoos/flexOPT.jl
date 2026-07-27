@@ -44,9 +44,14 @@ end
 function makeOPTsemiSymbolic(params::Dict)
     @unpack famousEquationType, Δ, orderBtime, orderBspace, pointsInSpace, pointsInTime, supplementaryOrder, fieldItpl, materItpl = params
     recipe_backend = _normalise_recipe_backend(_opt_paramget(params, :recipe_backend, _opt_paramget(params, :coefficient_backend, :auto)))
+    nuGeometryMode = Symbol(_opt_paramget(params, :nuGeometryMode, :middle))
+    nuGeometryMode in (:middle, :all) ||
+        throw(ArgumentError("nuGeometryMode must be :middle or :all"))
     Δnum = SVector(Δ)
     # construction of NamedTuples
-    trialFunctionsCharacteristics=(orderBtime=orderBtime,orderBspace=orderBspace,pointsInSpace=pointsInSpace,pointsInTime=pointsInTime)
+    trialFunctionsCharacteristics=(orderBtime=orderBtime,orderBspace=orderBspace,
+        pointsInSpace=pointsInSpace,pointsInTime=pointsInTime,
+        nuGeometryMode=nuGeometryMode)
 
     # here we can compute the different interpolated Taylor expansion options
     TaylorOptionsμ=TaylorOptions(fieldItpl,supplementaryOrder)
@@ -92,6 +97,38 @@ function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSp
 end
 
 function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend)
+    numberGeometries = configsTaylorμ.numberGeometries
+    numberGeometries == configsTaylorμᶜ.numberGeometries ||
+        throw(ArgumentError("field and material Taylor grids must expose the same ν geometries"))
+
+    results = map(1:numberGeometries) do iGeometry
+        configμ = merge(configsTaylorμ, (
+            numberGeometries=1,
+            availablePointsConfigurations=[configsTaylorμ.availablePointsConfigurations[iGeometry]],
+            centrePointConfigurations=[configsTaylorμ.centrePointConfigurations[iGeometry]],
+            availableμPoints=[configsTaylorμ.availableμPoints[iGeometry]],
+            availableμaxes=[configsTaylorμ.availableμaxes[iGeometry]],
+        ))
+        configμᶜ = merge(configsTaylorμᶜ, (
+            numberGeometries=1,
+            availablePointsConfigurations=[configsTaylorμᶜ.availablePointsConfigurations[iGeometry]],
+            centrePointConfigurations=[configsTaylorμᶜ.centrePointConfigurations[iGeometry]],
+            availableμPoints=[configsTaylorμᶜ.availableμPoints[iGeometry]],
+            availableμaxes=[configsTaylorμᶜ.availableμaxes[iGeometry]],
+        ))
+        _constructAmatrix_single(
+            equationCharacteristics, numbersOfTheSystem,
+            ordersForSplinesμ, configμ, ordersForSplinesμᶜ, configμᶜ,
+            Δnum, bigα, varM;
+            ImakeReport=ImakeReport, recipe_backend=recipe_backend,
+        )
+    end
+
+    Ajiννᶜ = cat((result[1] for result in results)...; dims=4)
+    return Ajiννᶜ, results[1][2], results[1][3]
+end
+
+function _constructAmatrix_single(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend)
     
     # for the future develpments: ν can move but it's already more or less coded! look at pointν and nGeometry
 
@@ -110,9 +147,7 @@ function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSp
     YorderBsplineμ = ordersForSplinesμ.YorderBspline
     YorderBsplineμᶜ= ordersForSplinesμᶜ.YorderBspline
 
-    #for iConfigGeometry ∈ 1:numberGeometries
-    nGeometry = numberGeometries
-    nGeometry =1
+    nGeometry = 1
     iConfigGeometry = 1
 
     @show pointsIndices=availablePointsConfigurations[iConfigGeometry] # CartesianIndices
