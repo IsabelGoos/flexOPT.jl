@@ -121,12 +121,12 @@ function configurations()
     ]
 end
 
-function make_recipe(config)
+function make_recipe(config; delta=1.0)
     return makeOPTsemiSymbolic(Dict{String,Any}(
         "famousEquationType" => "1DpoissonHetero",
         # Build once in dimensionless local coordinates. The physical source
         # is multiplied by h^2 below.
-        "Δ" => 1.0,
+        "Δ" => delta,
         "orderBtime" => 1,
         "orderBspace" => config.order_b,
         "pointsInSpace" => config.points,
@@ -137,6 +137,43 @@ function make_recipe(config)
         "nuGeometryMode" => :middle,
         "recipe_backend" => CPU(),
     ))["recette"]
+end
+
+function relative_scaling_error(target, reference, scale)
+    denominator = max(norm(target), eps(Float64))
+    return norm(target - scale .* reference) / denominator
+end
+
+function delta_scaling_check()
+    selected_names = [
+        "FD5",
+        "OPT4-field23-material-all4",
+        "OPT5-central",
+        "OPT6-field34-material-all6",
+    ]
+    selected = filter(config -> config.name in selected_names, configurations())
+    deltas = [0.5, 2pi / 52]
+    println("Checking full recipe scaling relative to Delta=1")
+    for config in selected
+        reference = prepare_numeric_recipe(make_recipe(config; delta=1.0))
+        println("\n", config.name)
+        for delta in deltas
+            current = prepare_numeric_recipe(make_recipe(config; delta=delta))
+            scale_a = dot(vec(current.material_tensor), vec(reference.material_tensor)) /
+                      dot(vec(reference.material_tensor), vec(reference.material_tensor))
+            scale_gamma = dot(current.gamma, reference.gamma) /
+                          dot(reference.gamma, reference.gamma)
+            error_a = relative_scaling_error(
+                current.material_tensor, reference.material_tensor, scale_a)
+            error_gamma = relative_scaling_error(
+                current.gamma, reference.gamma, scale_gamma)
+            ratio_error = abs(scale_gamma / scale_a - delta^2) / delta^2
+            @printf(
+                "  Delta=%g  sA=% .8e  sGamma=% .8e  relA=%.3e  relGamma=%.3e  ratio-error=%.3e\n",
+                delta, scale_a, scale_gamma, error_a, error_gamma, ratio_error,
+            )
+        end
+    end
 end
 
 periodic_index(index, n) = mod1(index, n)
@@ -245,14 +282,14 @@ function manufactured_fields(case, x)
     return exact, beta, force
 end
 
-function solve_periodic(prepared, n, case)
+function solve_periodic(prepared, n, case; source_scale=1.0)
     length_domain = 2pi
     h = length_domain / n
     x = collect(0:n-1) .* h
     exact, beta, force = manufactured_fields(case, x)
 
     A, Gamma = assemble_periodic(prepared, beta)
-    b = Gamma * (h^2 .* force)
+    b = Gamma * (source_scale .* force)
 
     # Periodic Poisson has a constant null vector. Even-point recipes may
     # possess an additional checkerboard null mode; retain their very large
@@ -292,18 +329,21 @@ function main()
     configs = configurations()
     cases = benchmark_cases()
 
-    recipes = Dict(config.name => make_recipe(config) for config in configs)
-    prepared = Dict(
-        config.name => prepare_numeric_recipe(recipes[config.name])
-        for config in configs
-    )
+    # Faithful production mode: reconstruct C^l_eta, A and Gamma at each
+    # actual Delta. This intentionally does not reuse a Delta=1 recipe.
+    prepared = Matrix{Any}(undef, length(sizes), length(configs))
+    for (grid_index, delta) in pairs(dx), (scheme_index, config) in pairs(configs)
+        @info "Preparing per-Delta recipe" config=config.name delta
+        prepared[grid_index, scheme_index] =
+            prepare_numeric_recipe(make_recipe(config; delta=delta))
+    end
 
     errors = fill(NaN, length(sizes), length(cases), length(configs))
     for (scheme_index, config) in pairs(configs)
         @info "Periodic convergence scheme" config=config.name
         for (case_index, case) in pairs(cases), (grid_index, n) in pairs(sizes)
             errors[grid_index, case_index, scheme_index] =
-                solve_periodic(prepared[config.name], n, case)
+                solve_periodic(prepared[grid_index, scheme_index], n, case)
         end
     end
     orders = observed_orders(errors, dx)
@@ -317,7 +357,8 @@ function main()
 
     output_dir = joinpath(FLEXOPT_ROOT, "scripts", "tmp", "poisson1d_periodic")
     mkpath(output_dir)
-    output_file = joinpath(output_dir, "poisson1d_periodic_convergence.jld2")
+    output_file = joinpath(
+        output_dir, "poisson1d_periodic_convergence_per_delta.jld2")
     jldsave(output_file;
         sizes, dx, errors, orders,
         scheme_names, case_names,
@@ -328,6 +369,7 @@ function main()
         domain_length=2pi,
         error_definition="norm(T_numerical-T_exact)/sqrt(N)",
         array_layout="errors[grid_index, case_index, scheme_index]",
+        recipe_delta_mode="A, Gamma and C^l_eta reconstructed at every stored dx",
     )
 
     println("\nSaved periodic convergence benchmark: ", output_file)
@@ -341,4 +383,8 @@ function main()
     return output_file
 end
 
-main()
+if get(ENV, "FLEXOPT_DELTA_SCALING_CHECK", "0") == "1"
+    delta_scaling_check()
+else
+    main()
+end

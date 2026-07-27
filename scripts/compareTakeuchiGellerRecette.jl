@@ -7,6 +7,8 @@
 # Usage:
 #   julia --project=.. scripts/compareTakeuchiGellerRecette.jl
 #   FLEXOPT_RECETTE_QUICK=1 julia --project=.. scripts/compareTakeuchiGellerRecette.jl
+#   FLEXOPT_RECETTE_TABLES=1 julia --project=.. scripts/compareTakeuchiGellerRecette.jl
+#   FLEXOPT_RECETTE_VERBOSE=1 julia --project=.. scripts/compareTakeuchiGellerRecette.jl
 #
 # This is deliberately not a wave-propagation benchmark. It asks flexOPT to
 # generate each local recette and compares its numerical coefficients with the
@@ -33,6 +35,8 @@ const RTOL = 2e-11
 const ATOL = 2e-11
 const RECIPE_CACHE = Dict{Tuple{String,Tuple},Any}()
 const QUICK = get(ENV, "FLEXOPT_RECETTE_QUICK", "0") == "1"
+const PRINT_TABLES = get(ENV, "FLEXOPT_RECETTE_TABLES", QUICK ? "1" : "0") == "1"
+const VERBOSE_GENERATOR = get(ENV, "FLEXOPT_RECETTE_VERBOSE", "0") == "1"
 
 interpolation(offset) = (
     ptsSpace=1,
@@ -62,9 +66,16 @@ end
 function generated_recipe(equation, spacings; supplementary_order=2)
     key = (equation, (Tuple(spacings)..., supplementary_order))
     return get!(RECIPE_CACHE, key) do
-        makeOPTsemiSymbolic(
+        construct = () -> makeOPTsemiSymbolic(
             opt3_parameters(equation, spacings, supplementary_order),
         )["recette"]
+        if VERBOSE_GENERATOR
+            construct()
+        else
+            redirect_stdout(devnull) do
+                construct()
+            end
+        end
     end
 end
 
@@ -98,38 +109,60 @@ function numerical_coefficients(recipe, values; scale=1.0)
     )
 end
 
-function paper_1998(delta_x, delta_t, rho, mu)
-    result = Dict{Tuple{Int,Int},Float64}()
+function paper_1998_components(delta_x, delta_t)
+    rho_coefficients = Dict{Tuple{Int,Int},Float64}()
+    mu_coefficients = Dict{Tuple{Int,Int},Float64}()
     smoothing = (1.0, 10.0, 1.0)
     second = (1.0, -2.0, 1.0)
     for (ix, x) in enumerate(-1:1), (it, t) in enumerate(-1:1)
-        mass = rho / delta_t^2 * smoothing[ix] * second[it] / 12
-        stiffness = mu / delta_x^2 * second[ix] * smoothing[it] / 12
-        result[(x, t)] = mass - stiffness
+        rho_coefficients[(x, t)] =
+            smoothing[ix] * second[it] / (12 * delta_t^2)
+        mu_coefficients[(x, t)] =
+            -second[ix] * smoothing[it] / (12 * delta_x^2)
     end
-    return result
+    return (; rho=rho_coefficients, mu=mu_coefficients)
 end
 
-function paper_2000(delta_x, delta_z, delta_t, rho, mu)
-    result = Dict{Tuple{Int,Int,Int},Float64}()
+function paper_2000_components(delta_x, delta_z, delta_t)
+    rho_coefficients = Dict{Tuple{Int,Int,Int},Float64}()
+    mu_coefficients = Dict{Tuple{Int,Int,Int},Float64}()
     smoothing = (1.0, 10.0, 1.0)
     second = (1.0, -2.0, 1.0)
     for (ix, x) in enumerate(-1:1),
         (iz, z) in enumerate(-1:1),
         (it, t) in enumerate(-1:1)
 
-        mass = rho / delta_t^2 *
-               smoothing[ix] * smoothing[iz] * second[it] / 144
-        stiffness_x = mu / delta_x^2 *
-                      second[ix] * smoothing[iz] * smoothing[it] / 144
-        stiffness_z = mu / delta_z^2 *
-                      smoothing[ix] * second[iz] * smoothing[it] / 144
-        result[(x, z, t)] = mass - stiffness_x - stiffness_z
+        rho_coefficients[(x, z, t)] =
+            smoothing[ix] * smoothing[iz] * second[it] /
+            (144 * delta_t^2)
+        mu_coefficients[(x, z, t)] =
+            -second[ix] * smoothing[iz] * smoothing[it] /
+            (144 * delta_x^2) -
+            smoothing[ix] * second[iz] * smoothing[it] /
+            (144 * delta_z^2)
     end
-    return result
+    return (; rho=rho_coefficients, mu=mu_coefficients)
 end
 
-function compare_coefficients(label, generated, published)
+function combine_components(components, rho, mu)
+    return Dict(
+        offset => rho * components.rho[offset] + mu * components.mu[offset]
+        for offset in keys(components.rho)
+    )
+end
+
+function subtract_coefficients(left, right)
+    Set(keys(left)) == Set(keys(right)) ||
+        error("Cannot subtract different stencil supports")
+    return Dict(offset => left[offset] - right[offset] for offset in keys(left))
+end
+
+function compare_coefficients(
+    label,
+    generated,
+    published;
+    print_table=false,
+)
     generated_keys = Set(keys(generated))
     published_keys = Set(keys(published))
     generated_keys == published_keys || error(
@@ -156,6 +189,19 @@ function compare_coefficients(label, generated, published)
 
     tolerance = ATOL + RTOL * maximum_scale
     passed = maximum_error <= tolerance
+    if print_table
+        println("\n", label)
+        println("  offset          flexOPT              paper                difference")
+        for offset in sort!(collect(keys(published)))
+            @printf(
+                "  %-14s  % .12e  % .12e  % .3e\n",
+                string(offset),
+                generated[offset],
+                published[offset],
+                generated[offset] - published[offset],
+            )
+        end
+    end
     @printf(
         "%-30s  max|Δc| = %.4e at %-12s  %s\n",
         label,
@@ -177,12 +223,41 @@ function validate_1998(delta_x, delta_t, rho, mu)
         "The current dimensionless recette supports one common grid scale; " *
         "got Δx=$delta_x and Δt=$delta_t",
     )
-    recipe = generated_recipe("1DsismoTimeHomo", (delta_x, delta_t))
-    values = (rho=rho, mu=mu, velocity=sqrt(mu / rho))
-    generated = numerical_coefficients(recipe, values; scale=inv(delta_x^2))
-    published = paper_1998(delta_x, delta_t, rho, mu)
+    recipe = generated_recipe(
+        "1DsismoTimeHomo",
+        (delta_x, delta_t),
+        supplementary_order=0,
+    )
+    scale = inv(delta_x^2)
+    generated_components = (
+        rho=numerical_coefficients(
+            recipe,
+            (rho=1.0, mu=0.0, velocity=0.0);
+            scale,
+        ),
+        mu=numerical_coefficients(
+            recipe,
+            (rho=0.0, mu=1.0, velocity=0.0);
+            scale,
+        ),
+    )
+    published_components = paper_1998_components(delta_x, delta_t)
+    compare_coefficients(
+        "1998 rho coefficients",
+        generated_components.rho,
+        published_components.rho,
+        print_table=PRINT_TABLES,
+    )
+    compare_coefficients(
+        "1998 mu coefficients",
+        generated_components.mu,
+        published_components.mu,
+        print_table=PRINT_TABLES,
+    )
+    generated = combine_components(generated_components, rho, mu)
+    published = combine_components(published_components, rho, mu)
     return compare_coefficients(
-        "1998 Eq. (18), Δ=($delta_x,$delta_t)",
+        "1998 combined, Δ=($delta_x,$delta_t)",
         generated,
         published,
     )
@@ -201,15 +276,50 @@ function validate_2000(delta_x, delta_z, delta_t, rho, mu)
         (delta_x, delta_z, delta_t),
         supplementary_order=0,
     )
-    values = (rho=rho, mu=mu, velocity=sqrt(mu / rho))
-    generated = numerical_coefficients(
+    # For u_tt-v^2*laplacian(u), the v=0 evaluation isolates the mass
+    # coefficient. The difference between v=1 and v=0 isolates the rigidity
+    # coefficient after restoring rho*(v^2)=mu.
+    # flexOPT integrates over x, z, and t. Its raw weak-form coefficients
+    # therefore carry Δ^3 from the integration measure, while the two
+    # derivatives contribute Δ^-2. The paper divides out that remaining Δ,
+    # so converting the dimensionless recette to its convention requires
+    # the complete Δ^-3 factor.
+    physical_scale = inv(delta_x^3)
+    generated_rho = numerical_coefficients(
         recipe,
-        values;
-        scale=rho / delta_x^2,
+        (rho=1.0, mu=0.0, velocity=0.0);
+        scale=physical_scale,
     )
-    published = paper_2000(delta_x, delta_z, delta_t, rho, mu)
+    generated_unit_velocity = numerical_coefficients(
+        recipe,
+        (rho=1.0, mu=1.0, velocity=1.0);
+        scale=physical_scale,
+    )
+    generated_components = (
+        rho=generated_rho,
+        mu=subtract_coefficients(generated_unit_velocity, generated_rho),
+    )
+    published_components = paper_2000_components(
+        delta_x,
+        delta_z,
+        delta_t,
+    )
+    compare_coefficients(
+        "2000 rho coefficients",
+        generated_components.rho,
+        published_components.rho,
+        print_table=PRINT_TABLES,
+    )
+    compare_coefficients(
+        "2000 mu coefficients",
+        generated_components.mu,
+        published_components.mu,
+        print_table=PRINT_TABLES,
+    )
+    generated = combine_components(generated_components, rho, mu)
+    published = combine_components(published_components, rho, mu)
     return compare_coefficients(
-        "2000 Eqs. (23)-(25), Δ=($delta_x,$delta_z,$delta_t)",
+        "2000 combined, Δ=($delta_x,$delta_z,$delta_t)",
         generated,
         published,
     )
@@ -217,7 +327,10 @@ end
 
 function main()
     println("Takeuchi-Geller local-recette validation")
-    println("Comparing combined interior coefficients; no time marching is used.\n")
+    println(
+        "Comparing rho and mu interior coefficients separately, then combined; " *
+        "no time marching is used.\n",
+    )
 
     material_pairs = QUICK ? (
         (rho=1.0, mu=1.0),
