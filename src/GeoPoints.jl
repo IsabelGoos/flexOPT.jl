@@ -7,6 +7,7 @@ module GeoPoints
     using ..planet1D
     using ..commonBatchs
     using Geodesy, StaticArrays,LinearAlgebra,GMT, UnPack
+    using CSV, Downloads, JLD2, SHA, ZipFile
     using Interpolations
     using FileIO,CairoMakie
     using Colors, Images
@@ -21,6 +22,7 @@ module GeoPoints
 
     # specific functions: former GeoPoints
     include("GeoPoints/GeoPoints.jl")
+    include("GeoPoints/niedVelocityModel.jl")
     include("GeoPoints/getSeismicParamTopo.jl")
     
     # specific functions: former imageReder
@@ -40,6 +42,10 @@ module GeoPoints
     #export effectiveRadius, makeLocalCoordinateUnitVectors, makeLocalCoordinateUnitVectors, makeLocalCoordinateUnitVectors
     export constructLocalBox
     export getParamsAndTopo,getParamsWithoutTopo #, interpolate_params, GMTprecision
+    export DEFAULT_NIED_VELOCITY_PAGE, DEFAULT_NIED_VELOCITY_SOURCE
+    export DEFAULT_NIED_VELOCITY_CACHE, set_default_nied_velocity_source!
+    export NIEDVelocityModel, load_nied_velocity_model
+    export nied_velocity_source_key
     export makeAdHocSeismicModel,initiateSeismicModel # soon we need to make a structure of seismicModel (1D-3D)
     
     # functions imageReader

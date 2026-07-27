@@ -109,7 +109,46 @@ end
 
 
 
-function getParamsAndTopo(allGridsInGeoPoints,effectiveRadii,precisionInKm::Float64;NradiusNodes=500,eps=10.0,VpWater=1.5,ρWater=1.0,VpAir=0.314,ρAir=0.001,hasAirModel=false)
+"""
+    getParamsAndTopo(points, effectiveRadii, precisionInKm;
+        velocity_model=:planet1D, ...)
+
+Build the seismic parameters and apply GMT topography. `velocity_model` may be:
+
+- `:planet1D`: retain the radial planet1D velocities (default);
+- `:NIED` (or the `:NIED2023` alias): replace reliable in-domain `Vp` and `Vs` with the NIED ALJ
+  three-dimensional model, while retaining planet1D density, attenuation and
+  other parameters.
+
+For NIED, `nied_source` may be either a downloadable ZIP URL or a local ZIP
+path. Parsed data are cached and the official slowness interpolation convention
+is used.
+"""
+function getParamsAndTopo(
+    allGridsInGeoPoints,
+    effectiveRadii,
+    precisionInKm::Float64;
+    NradiusNodes=500,
+    eps=10.0,
+    VpWater=1.5,
+    ρWater=1.0,
+    VpAir=0.314,
+    ρAir=0.001,
+    hasAirModel=false,
+    velocity_model::Symbol=:planet1D,
+    nied_source::AbstractString=DEFAULT_NIED_VELOCITY_SOURCE[],
+    nied_cache_dir::AbstractString=DEFAULT_NIED_VELOCITY_CACHE[],
+    nied_confidence_max::Union{Nothing,Real}=0.8,
+    nied_outside::Symbol=:planet1D,
+    nied_low_confidence::Symbol=:planet1D,
+    nied_force_download::Bool=false,
+    nied_force_parse::Bool=false,
+)
+    velocity_model in (:planet1D, :NIED, :NIED2023) ||
+        throw(ArgumentError(
+            "velocity_model must be :planet1D, :NIED, or :NIED2023",
+        ))
+    use_nied = velocity_model in (:NIED, :NIED2023)
 
     
     #@enum Couche Graine Noyau Manteau Océane Atmosphère Ionosphère Dehors
@@ -219,6 +258,27 @@ function getParamsAndTopo(allGridsInGeoPoints,effectiveRadii,precisionInKm::Floa
 
     seismicModel = interpolate_params(params, newRadii, effectiveRadii)
 
+    if use_nied
+        nied_fields = apply_nied_velocity_model!(
+            seismicModel,
+            allGridsInGeoPoints;
+            source=nied_source,
+            cache_dir=nied_cache_dir,
+            confidence_max=nied_confidence_max,
+            outside=nied_outside,
+            low_confidence=nied_low_confidence,
+            force_download=nied_force_download,
+            force_parse=nied_force_parse,
+        )
+        seismicModel = merge(
+            seismicModel,
+            nied_fields,
+            (velocity_model=velocity_model,),
+        )
+    else
+        seismicModel = merge(seismicModel, (velocity_model=:planet1D,))
+    end
+
     Threads.@threads for i in eachindex(allGridsInGeoPoints, topography)
         tmpPoint = allGridsInGeoPoints[i]
         topographyHere = topography[i]
@@ -231,12 +291,22 @@ function getParamsAndTopo(allGridsInGeoPoints,effectiveRadii,precisionInKm::Floa
             seismicModel.Vph[i] = VpAir
             seismicModel.Vsv[i] = 0.0
             seismicModel.Vsh[i] = 0.0
+            if use_nied
+                seismicModel.nied_P_mask[i] = false
+                seismicModel.nied_S_mask[i] = false
+                seismicModel.nied_mask[i] = false
+            end
         elseif topographyHere <= tmpPoint.alt <= 0.0
             seismicModel.ρ[i] = ρWater
             seismicModel.Vpv[i] = VpWater
             seismicModel.Vph[i] = VpWater
             seismicModel.Vsv[i] = 0.0
             seismicModel.Vsh[i] = 0.0
+            if use_nied
+                seismicModel.nied_P_mask[i] = false
+                seismicModel.nied_S_mask[i] = false
+                seismicModel.nied_mask[i] = false
+            end
         end
     end
 
