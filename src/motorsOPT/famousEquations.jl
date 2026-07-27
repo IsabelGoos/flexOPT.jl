@@ -337,9 +337,10 @@ function famousEquation(::Val{:eq_2DacousticHomoTime})
 end
 
 function famousEquation(::Val{:eq_3DsismoTimeIso})
-    # this is not yet working
-    # 3D wave equation with isotropy with double couple source
-    @variables ρ(x,y,z) (C(x,y,z))[1:3,1:3,1:3,1:3] u(x,y,z,t)[1:3] (M(x,y,z))[1:3,1:3]
+    # 3D isotropic elastic wave equation with a time-dependent moment tensor.
+    # M must depend on t: otherwise a three-point temporal recipe receives a
+    # one-point force axis and cannot construct its temporal B-spline family.
+    @variables ρ(x,y,z) (C(x,y,z))[1:3,1:3,1:3,1:3] u(x,y,z,t)[1:3] (M(x,y,z,t))[1:3,1:3]
     @variables λ(x,y,z) μ(x,y,z)
     #@variables ρ C[1:3,1:3,1:3,1:3] u(x,y,z,t)[1:3] f1,f2,f3 #(M(x,y,z))[1:3,1:3]
     #@variables λ μ
@@ -355,7 +356,7 @@ function famousEquation(::Val{:eq_3DsismoTimeIso})
 
     extexprs = derivMoment[1], derivMoment[2], derivMoment[3]
     extfields = M[1,1], M[1,2], M[1,3], M[2,2], M[2,3],M[3,3]
-    extvars = nothing
+    extvars = M[1,1], M[1,2], M[1,3], M[2,2], M[2,3],M[3,3]
     #extexprs = f1,f2,f3
     #extfields = f1,f2,f3
     #extvars = f1,f2,f3
@@ -374,7 +375,7 @@ function famousEquation(::Val{:eq_highSchoolProblem})
 
     extexprs = 0
     extfields = 0
-    extvars = nothing
+    extvars = extfields
 
     coordinates =(t)
 

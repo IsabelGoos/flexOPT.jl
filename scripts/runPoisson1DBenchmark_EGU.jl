@@ -61,6 +61,8 @@ function configuration(
     material_points=field_points,
     material_offset=field_offset,
     interpolation_order=1,
+    field_interpolation_order=interpolation_order,
+    material_interpolation_order=interpolation_order,
     nu_geometry_mode=:all,
 )
     return (
@@ -70,8 +72,8 @@ function configuration(
         pointsInSpace=points_in_space,
         pointsInTime=1,
         supplementaryOrder=supplementary_order,
-        fieldItpl=interpolation(field_points, field_offset, interpolation_order),
-        materItpl=interpolation(material_points, material_offset, interpolation_order),
+        fieldItpl=interpolation(field_points, field_offset, field_interpolation_order),
+        materItpl=interpolation(material_points, material_offset, material_interpolation_order),
         nuGeometryMode=nu_geometry_mode,
     )
 end
@@ -152,7 +154,35 @@ function benchmark_configurations()
             material_offset=-0.5,
             interpolation_order=1,
         ),
+        configuration(
+            "OPT4-implicit-field23-material-all4", 4;
+            supplementary_order=2,
+            field_points=2,
+            field_offset=1.0,
+            material_points=4,
+            material_offset=0.0,
+            interpolation_order=1,
+        ),
         configuration("OPT5-collocated", 5; supplementary_order=2),
+        configuration(
+            "OPT5-central-mu", 5;
+            supplementary_order=2,
+            field_points=1,
+            field_offset=2.0,
+            material_points=1,
+            material_offset=2.0,
+            interpolation_order=-1,
+        ),
+        configuration(
+            "OPT5-central-field-material234", 5;
+            supplementary_order=2,
+            field_points=1,
+            field_offset=2.0,
+            material_points=3,
+            material_offset=1.0,
+            field_interpolation_order=-1,
+            material_interpolation_order=1,
+        ),
         configuration(
             "OPT5-staggered", 5;
             supplementary_order=2,
