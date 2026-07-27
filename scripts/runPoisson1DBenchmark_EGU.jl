@@ -98,33 +98,35 @@ function benchmark_configurations()
             interpolation_order=-1,
         ),
 
-        # Interpolated Taylor expansions (manuscript equation 18).
-        configuration("OPT3-Y1", 3),
-        configuration("OPT4-Y1", 4; supplementary_order=3),
-        configuration("OPT5-Y1", 5; supplementary_order=4),
-        configuration("OPT5-Y2", 5; supplementary_order=4, interpolation_order=2),
+        # Interpolated Taylor expansions (manuscript equation 18). Comparing
+        # supplementary orders 0 and 2 isolates the underdetermined Taylor
+        # reconstruction from the effect of the four-point trial stencil.
+        configuration("OPT4-Y1-sup0", 4; supplementary_order=0),
+        configuration("OPT4-Y1-sup2", 4; supplementary_order=2),
+        configuration("OPT5-Y1-sup2", 5; supplementary_order=2),
 
-        # Stagger field and material interpolation supports.
+        # Staggered material Taylor centres. A negative half-cell margin gives
+        # centres 0.5, 1.5, ..., N+0.5 while field centres remain on nodes.
         configuration(
-            "OPT5-Y1-staggered", 5;
-            supplementary_order=4,
-            field_points=5,
+            "OPT2-Y1-material-half-shift", 2;
+            supplementary_order=0,
+            field_points=2,
             field_offset=0.0,
-            material_points=4,
-            material_offset=0.5,
+            material_points=3,
+            material_offset=-0.5,
             interpolation_order=1,
         ),
         configuration(
-            "OPT5-Y2-staggered", 5;
-            supplementary_order=4,
-            field_points=5,
+            "OPT4-Y1-sup2-material-half-shift", 4;
+            supplementary_order=2,
+            field_points=4,
             field_offset=0.0,
-            material_points=4,
-            material_offset=0.5,
-            interpolation_order=2,
+            material_points=5,
+            material_offset=-0.5,
+            interpolation_order=1,
         ),
     ]
-    return QUICK ? configs[[1, 4]] : configs
+    return QUICK ? configs[[6, 7]] : configs
 end
 
 function benchmark_cases(x)
