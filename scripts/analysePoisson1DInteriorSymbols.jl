@@ -46,6 +46,7 @@ function configuration(
     interpolation_order=-1,
     field_interpolation_order=interpolation_order,
     material_interpolation_order=interpolation_order,
+    taylor_inverse_mode=:scaled_svd,
 )
     return (
         name=name,
@@ -56,6 +57,7 @@ function configuration(
         supplementaryOrder=supplementary_order,
         fieldItpl=interpolation(field_points, field_offset, field_interpolation_order),
         materItpl=interpolation(material_points, material_offset, material_interpolation_order),
+        taylorInverseMode=taylor_inverse_mode,
     )
 end
 
@@ -103,6 +105,20 @@ function configurations()
             interpolation_order=1,
         ),
         configuration(
+            "OPT4-B2-field23-material23", 4;
+            order_b=2, supplementary_order=2,
+            field_points=2, field_offset=1.0,
+            material_points=2, material_offset=1.0,
+            interpolation_order=1,
+        ),
+        configuration(
+            "OPT4-B2-field23-material-all4", 4;
+            order_b=2, supplementary_order=2,
+            field_points=2, field_offset=1.0,
+            material_points=4, material_offset=0.0,
+            interpolation_order=1,
+        ),
+        configuration(
             "OPT4-field23-material-all4", 4;
             order_b=1, supplementary_order=2,
             field_points=2, field_offset=1.0,
@@ -136,6 +152,29 @@ function configurations()
             field_points=1, field_offset=2.0,
             material_points=1, material_offset=2.0,
             interpolation_order=-1,
+        ),
+        configuration(
+            "OPT5-central-mu-moore-penrose", 5;
+            order_b=1, supplementary_order=2,
+            field_points=1, field_offset=2.0,
+            material_points=1, material_offset=2.0,
+            interpolation_order=-1,
+            taylor_inverse_mode=:moore_penrose_svd,
+        ),
+        configuration(
+            "OPT5-B3-central-mu", 5;
+            order_b=3, supplementary_order=2,
+            field_points=1, field_offset=2.0,
+            material_points=1, material_offset=2.0,
+            interpolation_order=-1,
+        ),
+        configuration(
+            "OPT5-B3-central-mu-moore-penrose", 5;
+            order_b=3, supplementary_order=2,
+            field_points=1, field_offset=2.0,
+            material_points=1, material_offset=2.0,
+            interpolation_order=-1,
+            taylor_inverse_mode=:moore_penrose_svd,
         ),
         configuration(
             "OPT5-field234-material-centre", 5;
@@ -189,6 +228,7 @@ function make_recipe(config)
         "fieldItpl" => config.fieldItpl,
         "materItpl" => config.materItpl,
         "nuGeometryMode" => :middle,
+        "taylorInverseMode" => config.taylorInverseMode,
         "recipe_backend" => CPU(),
     ))["recette"]
 end

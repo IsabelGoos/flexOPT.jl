@@ -171,6 +171,7 @@ function TaylorCoefInversion(coefInversionDict::Dict)
     # be careful that pointsIndices is now a 1D array of integer vectors!!
 
     @unpack multiOrdersIndices, pointsIndices, μpointsIndices, Δ  = coefInversionDict
+    taylorInverseMode = Symbol(get(coefInversionDict, "taylor_inverse_mode", :scaled_svd))
 
 
     @show typeof(pointsIndices)
@@ -187,14 +188,14 @@ function TaylorCoefInversion(coefInversionDict::Dict)
 
     for μ_oneD in axes(CˡηGlobal,3)
         #@show typeof(multiOrdersIndices),typeof(pointsIndices)
-        CˡηGlobal[:,:,μ_oneD]=TaylorCoefInversion(numberOfLs,numberOfEtas,multiOrdersIndices,pointsIndices,Δ,μpointsIndices[μ_oneD])
+        CˡηGlobal[:,:,μ_oneD]=TaylorCoefInversion(numberOfLs,numberOfEtas,multiOrdersIndices,pointsIndices,Δ,μpointsIndices[μ_oneD]; taylor_inverse_mode=taylorInverseMode)
     end 
 
     return @strdict(CˡηGlobal)
 
 end
 
-function TaylorCoefInversion(numberOfLs,numberOfEtas,multiOrdersIndices,pointsIndices,Δ,μPoint)
+function TaylorCoefInversion(numberOfLs,numberOfEtas,multiOrdersIndices,pointsIndices,Δ,μPoint; taylor_inverse_mode=:scaled_svd)
 
 
     # the old version is : illposedTaylorCoefficientsInversionSingleCentre
@@ -224,9 +225,22 @@ function TaylorCoefInversion(numberOfLs,numberOfEtas,multiOrdersIndices,pointsIn
     # This avoids forming normal equations A'A, which square the condition number
     # and can break x/y symmetry for high supplementaryOrder.
     A = Num2Float64.(tmpTaylorExpansionCoeffs)
-    tmpCˡηlocal = stableTaylorPseudoInverse(A)
+    tmpCˡηlocal = if taylor_inverse_mode == :scaled_svd
+        stableTaylorPseudoInverse(A)
+    elseif taylor_inverse_mode == :moore_penrose_svd
+        directTaylorPseudoInverse(A)
+    else
+        throw(ArgumentError("unknown taylor inverse mode: $taylor_inverse_mode"))
+    end
 
     return tmpCˡηlocal
+end
+
+function directTaylorPseudoInverse(A; rtol=sqrt(eps(Float64)))
+    F = svd(Matrix{Float64}(A))
+    cutoff = rtol * maximum(F.S)
+    Sinv = map(s -> s <= cutoff ? 0.0 : inv(s), F.S)
+    return F.Vt' * Diagonal(Sinv) * F.U'
 end
 
 function stableTaylorPseudoInverse(A; rtol=sqrt(eps(Float64)), ridge=0.0)

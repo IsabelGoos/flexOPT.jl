@@ -45,6 +45,7 @@ function makeOPTsemiSymbolic(params::Dict)
     @unpack famousEquationType, Δ, orderBtime, orderBspace, pointsInSpace, pointsInTime, supplementaryOrder, fieldItpl, materItpl = params
     recipe_backend = _normalise_recipe_backend(_opt_paramget(params, :recipe_backend, _opt_paramget(params, :coefficient_backend, :auto)))
     nuGeometryMode = Symbol(_opt_paramget(params, :nuGeometryMode, :middle))
+    taylorInverseMode = Symbol(_opt_paramget(params, :taylorInverseMode, :scaled_svd))
     nuGeometryMode in (:middle, :all) ||
         throw(ArgumentError("nuGeometryMode must be :middle or :all"))
     Δnum = SVector(Δ)
@@ -68,7 +69,7 @@ function makeOPTsemiSymbolic(params::Dict)
     _,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ=investigateDependencies(equationCharacteristics,numbersOfTheSystem,trialFunctionsCharacteristics,TaylorOptionsμ,TaylorOptionsμᶜ)
     bigα,varM,CartesianDependencies=bigαFinder(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ)
 
-    Ajiννᶜ,Ulocal,Cˡη=constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM; recipe_backend=recipe_backend)
+    Ajiννᶜ,Ulocal,Cˡη=constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM; recipe_backend=recipe_backend, taylor_inverse_mode=taylorInverseMode)
     lhs=(Ajiννᶜ=Ajiννᶜ,Ulocal=Ulocal,varM=varM,CartesianDependencies=CartesianDependencies)
 
     # compact coefficients for r.h.s. of the equation
@@ -77,7 +78,7 @@ function makeOPTsemiSymbolic(params::Dict)
     numbersOfTheSystem = numbersOfTheSystemR
     _,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ=investigateDependencies(equationCharacteristics,numbersOfTheSystem,trialFunctionsCharacteristics,TaylorOptionsμ,TaylorOptionsμᶜ)
     bigα,varM,CartesianDependencies=bigαFinder(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ)
-    Γjiννᶜ,Flocal,CˡηForce =constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM; recipe_backend=recipe_backend)
+    Γjiννᶜ,Flocal,CˡηForce =constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM; recipe_backend=recipe_backend, taylor_inverse_mode=taylorInverseMode)
     rhs=(Γjiννᶜ=Γjiννᶜ,Flocal=Flocal,varF=varM,CartesianDependencies=CartesianDependencies)
 
     #
@@ -92,11 +93,11 @@ function makeOPTsemiSymbolic(params::Dict)
 end
 
 
-function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend)
-    return constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμ,configsTaylorμ,Δnum,bigα,varM;ImakeReport=ImakeReport, recipe_backend=recipe_backend)
+function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend, taylor_inverse_mode=:scaled_svd)
+    return constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμ,configsTaylorμ,Δnum,bigα,varM;ImakeReport=ImakeReport, recipe_backend=recipe_backend, taylor_inverse_mode=taylor_inverse_mode)
 end
 
-function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend)
+function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend, taylor_inverse_mode=:scaled_svd)
     numberGeometries = configsTaylorμ.numberGeometries
     numberGeometries == configsTaylorμᶜ.numberGeometries ||
         throw(ArgumentError("field and material Taylor grids must expose the same ν geometries"))
@@ -121,6 +122,7 @@ function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSp
             ordersForSplinesμ, configμ, ordersForSplinesμᶜ, configμᶜ,
             Δnum, bigα, varM;
             ImakeReport=ImakeReport, recipe_backend=recipe_backend,
+            taylor_inverse_mode=taylor_inverse_mode,
         )
     end
 
@@ -128,7 +130,7 @@ function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSp
     return Ajiννᶜ, results[1][2], results[1][3]
 end
 
-function _constructAmatrix_single(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend)
+function _constructAmatrix_single(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend, taylor_inverse_mode=:scaled_svd)
     
     # for the future develpments: ν can move but it's already more or less coded! look at pointν and nGeometry
 
@@ -194,12 +196,14 @@ function _constructAmatrix_single(equationCharacteristics,numbersOfTheSystem,ord
     @show typeof(μPoints), μPoints[1], typeof(pointsIndices)
 
     coefInversionDict = Dict{String,Any}(@strdict multiOrdersIndices pointsIndices μpointsIndices=μPoints Δ=Δnum)
-    coefInversionDict["pinv_version"] = "scaled_svd_v1"
+    coefInversionDict["pinv_version"] = string(taylor_inverse_mode)
+    coefInversionDict["taylor_inverse_mode"] = taylor_inverse_mode
     output=myProduceOrLoad(TaylorCoefInversion,coefInversionDict,"taylorCoefInv")
     Cˡη=output["CˡηGlobal"]
 
     coefInversionDict = Dict{String,Any}(@strdict multiOrdersIndices pointsIndices μpointsIndices=μᶜPoints Δ=Δnum)
-    coefInversionDict["pinv_version"] = "scaled_svd_v1"
+    coefInversionDict["pinv_version"] = string(taylor_inverse_mode)
+    coefInversionDict["taylor_inverse_mode"] = taylor_inverse_mode
     output=myProduceOrLoad(TaylorCoefInversion,coefInversionDict,"taylorCoefInv")
     Cˡηᶜ=output["CˡηGlobal"]
 

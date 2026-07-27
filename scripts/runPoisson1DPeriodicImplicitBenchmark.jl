@@ -36,7 +36,7 @@ function configuration(
     name, points;
     family="OPT",
     mu_description="",
-    order_b=1,
+    order_b=points - 2,
     supplementary_order=2,
     field_points=1,
     field_offset=(points - 1) / 2,
@@ -44,8 +44,10 @@ function configuration(
     material_offset=field_offset,
     field_order=-1,
     material_order=field_order,
+    taylor_inverse_mode=:scaled_svd,
 )
     return (; name, family, mu_description, points, order_b, supplementary_order,
+        taylor_inverse_mode,
         fieldItpl=interpolation(field_points, field_offset, field_order),
         materItpl=interpolation(material_points, material_offset, material_order))
 end
@@ -90,6 +92,9 @@ function configurations()
 
         configuration("OPT5-central", 5; mu_description="field centre; material centre",
             field_offset=2.0),
+        configuration("OPT5-central-moore-penrose", 5;
+            mu_description="field centre; material centre; direct Moore-Penrose SVD",
+            field_offset=2.0, taylor_inverse_mode=:moore_penrose_svd),
         configuration("OPT5-central-material234", 5;
             mu_description="field centre; material nodes 2:4",
             field_offset=2.0, material_points=3, material_offset=1.0,
@@ -135,6 +140,7 @@ function make_recipe(config; delta=1.0)
         "fieldItpl" => config.fieldItpl,
         "materItpl" => config.materItpl,
         "nuGeometryMode" => :middle,
+        "taylorInverseMode" => config.taylor_inverse_mode,
         "recipe_backend" => CPU(),
     ))["recette"]
 end
