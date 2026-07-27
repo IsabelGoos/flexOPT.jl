@@ -101,6 +101,7 @@ function benchmark_configurations()
         # Interpolated Taylor expansions (manuscript equation 18). Comparing
         # supplementary orders 0 and 2 isolates the underdetermined Taylor
         # reconstruction from the effect of the four-point trial stencil.
+        configuration("OPT3-Y1-sup2", 3; supplementary_order=2),
         configuration("OPT4-Y1-sup0", 4; supplementary_order=0),
         configuration("OPT4-Y1-sup2", 4; supplementary_order=2),
         configuration("OPT5-Y1-sup2", 5; supplementary_order=2),
@@ -108,11 +109,11 @@ function benchmark_configurations()
         # Staggered material Taylor centres. A negative half-cell margin gives
         # centres 0.5, 1.5, ..., N+0.5 while field centres remain on nodes.
         configuration(
-            "OPT2-Y1-material-half-shift", 2;
-            supplementary_order=0,
-            field_points=2,
+            "OPT3-Y1-sup2-material-half-shift", 3;
+            supplementary_order=2,
+            field_points=3,
             field_offset=0.0,
-            material_points=3,
+            material_points=4,
             material_offset=-0.5,
             interpolation_order=1,
         ),
@@ -125,8 +126,17 @@ function benchmark_configurations()
             material_offset=-0.5,
             interpolation_order=1,
         ),
+        configuration(
+            "OPT5-Y1-sup2-material-half-shift", 5;
+            supplementary_order=2,
+            field_points=5,
+            field_offset=0.0,
+            material_points=6,
+            material_offset=-0.5,
+            interpolation_order=1,
+        ),
     ]
-    return QUICK ? configs[3:end] : configs
+    return configs
 end
 
 function benchmark_cases(x)
@@ -143,7 +153,10 @@ function benchmark_cases(x)
         merge(case, (; force=mySimplify(∂x(mySimplify(case.beta * ∂x(case.u))))))
         for case in raw_cases
     ]
-    return QUICK ? cases[1:1] : cases
+    # The second quick case is required to exercise material interpolation:
+    # for the homogeneous first case, collocated and half-shifted beta centres
+    # are mathematically indistinguishable.
+    return QUICK ? cases[1:2] : cases
 end
 
 evaluate_expression(expr, x, grid) =
