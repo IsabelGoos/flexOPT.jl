@@ -126,7 +126,7 @@ function benchmark_configurations()
             interpolation_order=1,
         ),
     ]
-    return QUICK ? configs[[6, 7]] : configs
+    return QUICK ? configs[3:end] : configs
 end
 
 function benchmark_cases(x)
