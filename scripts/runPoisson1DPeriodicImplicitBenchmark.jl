@@ -92,6 +92,9 @@ function configurations()
 
         configuration("OPT5-central", 5; mu_description="field centre; material centre",
             field_offset=2.0),
+        configuration("OPT5-ordinary-hat-supp0", 5;
+            mu_description="ordinary hat test; field/material centre",
+            order_b=1, supplementary_order=0, field_offset=2.0),
         configuration("OPT5-central-moore-penrose", 5;
             mu_description="field centre; material centre; direct Moore-Penrose SVD",
             field_offset=2.0, taylor_inverse_mode=:moore_penrose_svd),
@@ -389,8 +392,10 @@ function main()
     return output_file
 end
 
-if get(ENV, "FLEXOPT_DELTA_SCALING_CHECK", "0") == "1"
-    delta_scaling_check()
-else
-    main()
+if abspath(PROGRAM_FILE) == @__FILE__
+    if get(ENV, "FLEXOPT_DELTA_SCALING_CHECK", "0") == "1"
+        delta_scaling_check()
+    else
+        main()
+    end
 end

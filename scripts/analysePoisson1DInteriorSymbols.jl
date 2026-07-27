@@ -255,10 +255,10 @@ function configurations()
     ]
 end
 
-function make_recipe(config)
+function make_recipe(config; delta=1.0)
     return makeOPTsemiSymbolic(Dict{String,Any}(
         "famousEquationType" => EQUATION,
-        "Δ" => 1.0,
+        "Δ" => delta,
         "orderBtime" => config.orderBtime,
         "orderBspace" => config.orderBspace,
         "pointsInSpace" => config.pointsInSpace,
@@ -340,4 +340,6 @@ function main()
     return results
 end
 
-main()
+if abspath(PROGRAM_FILE) == @__FILE__
+    main()
+end

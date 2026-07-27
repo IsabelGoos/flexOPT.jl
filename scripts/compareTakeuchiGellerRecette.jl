@@ -52,6 +52,7 @@ function recipe_parameters(
     spacings,
     supplementary_order;
     points_in_space=3,
+    interpolation_offset=(points_in_space - 1) / 2,
 )
     return Dict{String,Any}(
         "famousEquationType" => equation,
@@ -61,8 +62,8 @@ function recipe_parameters(
         "pointsInSpace" => points_in_space,
         "pointsInTime" => 3,
         "supplementaryOrder" => supplementary_order,
-        "fieldItpl" => interpolation((points_in_space - 1) / 2),
-        "materItpl" => interpolation((points_in_space - 1) / 2),
+        "fieldItpl" => interpolation(interpolation_offset),
+        "materItpl" => interpolation(interpolation_offset),
         "nuGeometryMode" => :middle,
         "recipe_backend" => CPU(),
     )
@@ -73,10 +74,16 @@ function generated_recipe(
     spacings;
     supplementary_order=2,
     points_in_space=3,
+    interpolation_offset=(points_in_space - 1) / 2,
 )
     key = (
         equation,
-        (Tuple(spacings)..., supplementary_order, points_in_space),
+        (
+            Tuple(spacings)...,
+            supplementary_order,
+            points_in_space,
+            interpolation_offset,
+        ),
     )
     return get!(RECIPE_CACHE, key) do
         construct = () -> makeOPTsemiSymbolic(
@@ -85,6 +92,7 @@ function generated_recipe(
                 spacings,
                 supplementary_order;
                 points_in_space,
+                interpolation_offset,
             ),
         )["recette"]
         if VERBOSE_GENERATOR
@@ -100,7 +108,7 @@ end
 function material_value(symbol, values)
     name = string(symbol)
     occursin("ρ", name) && return values.rho
-    occursin("λ", name) && return values.lambda
+    (occursin("λ", name) || occursin("lambda", name)) && return values.lambda
     occursin("μ", name) && return values.mu
     occursin("v", name) && return values.velocity
     error("No material substitution was supplied for flexOPT symbol $name")
@@ -442,6 +450,7 @@ function validate_2000_psv(
         (delta_x, delta_z, delta_t);
         points_in_space=4,
         supplementary_order=2,
+        interpolation_offset=1.0,
     )
     physical_scale = inv(delta_x^3)
     published_blocks = paper_2000_psv_components(
@@ -503,6 +512,14 @@ function validate_2000_psv(
     return nothing
 end
 
+function validate_2000_eq54(delta_x, delta_z, delta_t, lambda)
+    error(
+        "Eq. (54) cannot yet be compared as a flexOPT recette: the current " *
+        "dependency analyzer does not expose an isolated mixed derivative, " *
+        "and the coupled elastic recipe uses one global spatial support.",
+    )
+end
+
 function main()
     println("Takeuchi-Geller local-recette validation")
     println(
@@ -552,19 +569,19 @@ function main()
                 material.rho,
                 material.mu,
             )
-            validate_2000_psv(
-                spacing.delta_x,
-                spacing.delta_z,
-                spacing.delta_t,
-                material.rho,
-                material.lambda,
-                material.mu,
-            )
         end
         println()
     end
 
-    println("All generated recettes agree with the published operators.")
+    println(
+        "All enabled generated-recette comparisons agree with the published " *
+        "operators.",
+    )
+    println(
+        "Eq. (54) is not enabled: flexOPT currently reconstructs the coupled " *
+        "elastic system globally and does not expose the paper's separately " *
+        "assembled four-point mixed-derivative operator.",
+    )
     return nothing
 end
 
