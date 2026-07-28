@@ -40,8 +40,9 @@ function WYYKKIntegralNumerical(params;ImakeReport=true)
     
     @unpack orderBspline1D, YorderBspline1Dμᶜ, YorderBspline1Dμ, μᶜs, μs, maxNode, ν, lᶜ_nᶜ_max, l_n_max, Δ = params
     νRefPoints = hasproperty(params, :νRefPoints) ? params.νRefPoints : collect(1:maxNode)
+    WνOffset = hasproperty(params, :WνOffset) ? params.WνOffset : 0.0
 
-    paramsForSymbolic = @strdict orderBspline1D YorderBspline1Dμᶜ YorderBspline1Dμ μᶜs μs maxNode ν νRefPoints lᶜ_nᶜ_max l_n_max ImakeReport
+    paramsForSymbolic = @strdict orderBspline1D YorderBspline1Dμᶜ YorderBspline1Dμ μᶜs μs maxNode ν νRefPoints WνOffset lᶜ_nᶜ_max l_n_max ImakeReport
     paramsForSymbolic["symbolic_endpoint_version"] = "segmentwise_definite_integrals_v5"
 
     output = myProduceOrLoad(WYYKKIntegralPureSymbolic,paramsForSymbolic,"WYYKKIntegralSymbolic")
@@ -89,13 +90,16 @@ function WYYKKIntegralPureSymbolic(params::Dict)
 
     @unpack orderBspline1D,YorderBspline1Dμᶜ,YorderBspline1Dμ,μᶜs,μs,maxNode,ν,lᶜ_nᶜ_max,l_n_max,ImakeReport = params
     νRefPoints = haskey(params, "νRefPoints") ? params["νRefPoints"] : collect(1:maxNode)
+    WνOffset = haskey(params, "WνOffset") ? params["WνOffset"] : 0.0
+    Wν = ν .+ WνOffset
+    WνRefPoints = νRefPoints .+ WνOffset
 
     nodesFromOne = collect(1:1:maxNode) # ∈ Z like [1,2,3], an array of integers collect(1:1:N) (nothing else!!)
 
     allNodes = unique(sort(vcat(
         Float64.(nodesFromOne),
-        Float64.(ν),
-        Float64.(νRefPoints),
+        Float64.(Wν),
+        Float64.(WνRefPoints),
         Float64.(μs),
         Float64.(μᶜs),
     )))
@@ -103,8 +107,8 @@ function WYYKKIntegralPureSymbolic(params::Dict)
     to_indices(xs, master) = searchsortedfirst.(Ref(master), Float64.(xs))
 
     idx_nodesFromOne = to_indices(nodesFromOne, allNodes)
-    idx_ν            = to_indices(ν, allNodes)
-    idx_νRefPoints   = to_indices(νRefPoints, allNodes)
+    idx_ν            = to_indices(Wν, allNodes)
+    idx_νRefPoints   = to_indices(WνRefPoints, allNodes)
     idx_μs           = to_indices(μs, allNodes)
     idx_μᶜs          = to_indices(μᶜs, allNodes)
 

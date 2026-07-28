@@ -45,9 +45,10 @@ function configuration(
     field_order=-1,
     material_order=field_order,
     taylor_inverse_mode=:scaled_svd,
+    hierarchical_test_functions=false,
 )
     return (; name, family, mu_description, points, order_b, supplementary_order,
-        taylor_inverse_mode,
+        taylor_inverse_mode, hierarchical_test_functions,
         fieldItpl=interpolation(field_points, field_offset, field_order),
         materItpl=interpolation(material_points, material_offset, material_order))
 end
@@ -79,6 +80,12 @@ function configurations()
             field_points=2, field_offset=1.0,
             material_points=2, material_offset=1.0,
             field_order=1, material_order=1),
+        configuration("OPT4-hierarchical-B1-B2-experimental", 4;
+            mu_description="normalised separate B1 and B2 residuals; parity alignment experimental",
+            field_points=2, field_offset=1.0,
+            material_points=2, material_offset=1.0,
+            field_order=1, material_order=1,
+            hierarchical_test_functions=true),
         configuration("OPT4-field23-material-all4", 4;
             mu_description="implicit field nodes 2:3; material nodes 1:4",
             field_points=2, field_offset=1.0,
@@ -92,6 +99,9 @@ function configurations()
 
         configuration("OPT5-central", 5; mu_description="field centre; material centre",
             field_offset=2.0),
+        configuration("OPT5-hierarchical-B1-B2-B3-experimental", 5;
+            mu_description="normalised separate B1, B2 and B3 residuals",
+            field_offset=2.0, hierarchical_test_functions=true),
         configuration("OPT5-ordinary-hat-supp0", 5;
             mu_description="ordinary hat test; field/material centre",
             order_b=1, supplementary_order=0, field_offset=2.0),
@@ -144,6 +154,7 @@ function make_recipe(config; delta=1.0)
         "materItpl" => config.materItpl,
         "nuGeometryMode" => :middle,
         "taylorInverseMode" => config.taylor_inverse_mode,
+        "hierarchicalTestFunctions" => config.hierarchical_test_functions,
         "recipe_backend" => CPU(),
     ))["recette"]
 end
@@ -203,43 +214,52 @@ function prepare_numeric_recipe(recipe)
     # The Poisson operator is linear in kappa. Precompute its response to
     # every local material basis vector so the large parameter sweep does not
     # perform Symbolics substitutions inside every grid row.
-    material_tensor = zeros(Float64, number_points, number_points)
+    number_blocks = ndims(lhs.Ajiννᶜ) >= 5 ? size(lhs.Ajiννᶜ, 5) : 1
+    material_tensor = zeros(Float64, number_points, number_points, number_blocks)
     for material_point in 1:number_points
         mapping = Dict{Any,Any}(
             lhs.varM[1, point][] => (point == material_point ? 1.0 : 0.0)
             for point in 1:number_points
         )
-        for field_point in 1:number_points
-            material_tensor[field_point, material_point] = numeric_value(
-                lhs.Ajiννᶜ[field_point, 1, 1, geometry], mapping)
+        for block in 1:number_blocks, field_point in 1:number_points
+            expression = number_blocks == 1 && ndims(lhs.Ajiννᶜ) == 4 ?
+                lhs.Ajiννᶜ[field_point, 1, 1, geometry] :
+                lhs.Ajiννᶜ[field_point, 1, 1, geometry, block]
+            material_tensor[field_point, material_point, block] =
+                numeric_value(expression, mapping)
         end
     end
 
     force_mapping = Dict{Any,Any}(entry[] => 1.0 for entry in vec(rhs.varF))
-    gamma = Float64[
-        numeric_value(rhs.Γjiννᶜ[field_point, 1, 1, geometry], force_mapping)
-        for field_point in 1:number_points
-    ]
-    return (; offsets, material_tensor, gamma)
+    gamma = zeros(Float64, number_points, number_blocks)
+    for block in 1:number_blocks, field_point in 1:number_points
+        expression = number_blocks == 1 && ndims(rhs.Γjiννᶜ) == 4 ?
+            rhs.Γjiννᶜ[field_point, 1, 1, geometry] :
+            rhs.Γjiννᶜ[field_point, 1, 1, geometry, block]
+        gamma[field_point, block] = numeric_value(expression, force_mapping)
+    end
+    return (; offsets, material_tensor, gamma, number_blocks)
 end
 
 function assemble_periodic(prepared, beta)
     n = length(beta)
     offsets = prepared.offsets
     number_points = length(offsets)
-    A = spzeros(Float64, n, n)
-    Gamma = spzeros(Float64, n, n)
+    number_blocks = prepared.number_blocks
+    A = spzeros(Float64, n * number_blocks, n)
+    Gamma = spzeros(Float64, n * number_blocks, n)
 
-    for row in 1:n
+    for block in 1:number_blocks, row in 1:n
+        residual_row = row + (block - 1) * n
         local_beta = Float64[
             beta[periodic_index(row + offsets[point], n)]
             for point in 1:number_points
         ]
-        a = prepared.material_tensor * local_beta
+        a = prepared.material_tensor[:, :, block] * local_beta
         for field_point in 1:number_points
             column = periodic_index(row + offsets[field_point], n)
-            A[row, column] += a[field_point]
-            Gamma[row, column] += prepared.gamma[field_point]
+            A[residual_row, column] += a[field_point]
+            Gamma[residual_row, column] += prepared.gamma[field_point, block]
         end
     end
     return A, Gamma
@@ -253,16 +273,9 @@ function benchmark_cases()
         kKappa=0, phiKappa=0.0,
         period_ratio=Inf, phase_shift=0.0,
     ))
-    for (label, kKappa, phiKappa) in [
-        ("same_period_phase0", 2, 0.0),
-        ("same_period_phase_pi4", 2, pi / 4),
-        ("same_period_phase_pi2", 2, pi / 2),
-        ("material_twice_period_phase0", 1, 0.0),
-        ("material_twice_period_phase_pi2", 1, pi / 2),
-        ("material_half_period_phase0", 4, 0.0),
-        ("material_half_period_phase_pi2", 4, pi / 2),
-        ("material_quarter_period_phase_pi4", 8, pi / 4),
-    ]
+    phase_specs = [("phase0", 0.0), ("phase_pi4", pi / 4), ("phase_pi2", pi / 2)]
+    for kKappa in (1, 2, 3, 4, 6, 8), (phase_label, phiKappa) in phase_specs
+        label = "kappa_k$(kKappa)_$(phase_label)"
         push!(cases, (
             name=label,
             kT=2, phiT=0.0, kappa0=2.0, amplitude=0.35,
@@ -271,6 +284,13 @@ function benchmark_cases()
             phase_shift=phiKappa,
         ))
     end
+    push!(cases, (
+        name="kappa_k5_phase_pi3",
+        kT=2, phiT=0.0, kappa0=2.0, amplitude=0.35,
+        kKappa=5, phiKappa=pi / 3,
+        period_ratio=2 / 5,
+        phase_shift=pi / 3,
+    ))
     return cases
 end
 
@@ -299,6 +319,23 @@ function solve_periodic(prepared, n, case; source_scale=1.0)
 
     A, Gamma = assemble_periodic(prepared, beta)
     b = Gamma * (source_scale .* force)
+
+    if prepared.number_blocks > 1
+        # Each B-spline order contributes an independent, equally weighted
+        # residual. Normalise the complete [A | -Gamma] row, then append the
+        # periodic mean constraint and solve the overdetermined system.
+        for row in axes(A, 1)
+            scale = sqrt(sum(abs2, A[row, :]) + sum(abs2, Gamma[row, :]))
+            if scale > eps(Float64)
+                A[row, :] ./= scale
+                Gamma[row, :] ./= scale
+            end
+        end
+        b = Gamma * (source_scale .* force)
+        mean_row = sparse(fill(1, n), collect(1:n), fill(1 / n, n), 1, n)
+        solution = [A; mean_row] \ vcat(b, sum(exact) / n)
+        return norm(solution - exact) / sqrt(n)
+    end
 
     # Periodic Poisson has a constant null vector. Even-point recipes may
     # possess an additional checkerboard null mode; retain their very large
@@ -336,6 +373,19 @@ function main()
     sizes = [16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512]
     dx = 2pi ./ sizes
     configs = configurations()
+    if get(ENV, "FLEXOPT_HIERARCHICAL_SWEEP", "0") == "1"
+        selected_names = Set([
+            "FD3",
+            "FD5",
+            "OPT3-central",
+            "OPT4-field23-material23",
+            "OPT4-hierarchical-B1-B2-experimental",
+            "OPT5-ordinary-hat-supp0",
+            "OPT5-central",
+            "OPT5-hierarchical-B1-B2-B3-experimental",
+        ])
+        configs = filter(config -> config.name in selected_names, configs)
+    end
     cases = benchmark_cases()
 
     # Faithful production mode: reconstruct C^l_eta, A and Gamma at each
