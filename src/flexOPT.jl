@@ -30,6 +30,7 @@ module flexOPT
     export timeDimensionString
     include("../src/motorsOPT/famousEquations.jl")
     include("../src/motorsOPT/famousSourceFunctions.jl")
+    include("../src/motorsOPT/famousBoundaryConditions.jl")
 
     # semi-symbolics operators to fully numerical operators
     #include("fullyNumericalOPT/makeCostFunctions.jl")

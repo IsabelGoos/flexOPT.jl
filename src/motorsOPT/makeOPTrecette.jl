@@ -41,12 +41,51 @@ function TaylorOptions(itplParams,supplementaryOrder)
     return options
 end
 
+function _hierarchical_test_orders(orderBspline)
+    maximum_order = maximum(orderBspline)
+    maximum_order <= 1 && return [maximum_order]
+    return collect(1:maximum_order)
+end
+
+function _orders_at_test_level(ordersForSplines, level)
+    orderBspline = map(ordersForSplines.orderBspline) do order
+        order > 0 ? min(level, order) : order
+    end
+    return merge(ordersForSplines, (; orderBspline))
+end
+
+function _construct_test_blocks(
+    equationCharacteristics, numbersOfTheSystem,
+    ordersForSplinesμ, configsTaylorμ,
+    ordersForSplinesμᶜ, configsTaylorμᶜ,
+    Δnum, bigα, varM;
+    hierarchical=false,
+    kwargs...,
+)
+    levels = hierarchical ?
+        _hierarchical_test_orders(ordersForSplinesμ.orderBspline) :
+        [maximum(ordersForSplinesμ.orderBspline)]
+    results = map(levels) do level
+        constructAmatrix(
+            equationCharacteristics, numbersOfTheSystem,
+            _orders_at_test_level(ordersForSplinesμ, level), configsTaylorμ,
+            _orders_at_test_level(ordersForSplinesμᶜ, level), configsTaylorμᶜ,
+            Δnum, bigα, varM;
+            kwargs...,
+        )
+    end
+    operators = length(results) == 1 ? results[1][1] :
+        cat((result[1] for result in results)...; dims=5)
+    return operators, results[1][2], results[1][3], levels
+end
+
 function makeOPTsemiSymbolic(params::Dict)
     @unpack famousEquationType, Δ, orderBtime, orderBspace, pointsInSpace, pointsInTime, supplementaryOrder, fieldItpl, materItpl = params
     recipe_backend = _normalise_recipe_backend(_opt_paramget(params, :recipe_backend, _opt_paramget(params, :coefficient_backend, :auto)))
     nuGeometryMode = Symbol(_opt_paramget(params, :nuGeometryMode, :middle))
     taylorInverseMode = Symbol(_opt_paramget(params, :taylorInverseMode, :scaled_svd))
     trialFunctionRefPoints = _opt_paramget(params, :trialFunctionRefPoints, nothing)
+    hierarchicalTestFunctions = Bool(_opt_paramget(params, :hierarchicalTestFunctions, false))
     nuGeometryMode in (:middle, :all) ||
         throw(ArgumentError("nuGeometryMode must be :middle or :all"))
     Δnum = SVector(Δ)
@@ -70,7 +109,7 @@ function makeOPTsemiSymbolic(params::Dict)
     _,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ=investigateDependencies(equationCharacteristics,numbersOfTheSystem,trialFunctionsCharacteristics,TaylorOptionsμ,TaylorOptionsμᶜ)
     bigα,varM,CartesianDependencies=bigαFinder(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ)
 
-    Ajiννᶜ,Ulocal,Cˡη=constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM; recipe_backend=recipe_backend, taylor_inverse_mode=taylorInverseMode, trial_function_ref_points=trialFunctionRefPoints)
+    Ajiννᶜ,Ulocal,Cˡη,testFunctionOrders=_construct_test_blocks(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM; hierarchical=hierarchicalTestFunctions, recipe_backend=recipe_backend, taylor_inverse_mode=taylorInverseMode, trial_function_ref_points=trialFunctionRefPoints)
     lhs=(Ajiννᶜ=Ajiννᶜ,Ulocal=Ulocal,varM=varM,CartesianDependencies=CartesianDependencies)
 
     # compact coefficients for r.h.s. of the equation
@@ -79,7 +118,9 @@ function makeOPTsemiSymbolic(params::Dict)
     numbersOfTheSystem = numbersOfTheSystemR
     _,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ=investigateDependencies(equationCharacteristics,numbersOfTheSystem,trialFunctionsCharacteristics,TaylorOptionsμ,TaylorOptionsμᶜ)
     bigα,varM,CartesianDependencies=bigαFinder(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ)
-    Γjiννᶜ,Flocal,CˡηForce =constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM; recipe_backend=recipe_backend, taylor_inverse_mode=taylorInverseMode, trial_function_ref_points=trialFunctionRefPoints)
+    Γjiννᶜ,Flocal,CˡηForce,testFunctionOrdersForce =_construct_test_blocks(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM; hierarchical=hierarchicalTestFunctions, recipe_backend=recipe_backend, taylor_inverse_mode=taylorInverseMode, trial_function_ref_points=trialFunctionRefPoints)
+    testFunctionOrders == testFunctionOrdersForce ||
+        error("left and right hierarchical test orders differ")
     rhs=(Γjiννᶜ=Γjiννᶜ,Flocal=Flocal,varF=varM,CartesianDependencies=CartesianDependencies)
 
     #
@@ -88,7 +129,7 @@ function makeOPTsemiSymbolic(params::Dict)
     nConfigurations=size(nodes)[1]
     numbersOfTheSystem=(numbersOfTheSystemL=numbersOfTheSystemL,numbersOfTheSystemR=numbersOfTheSystemR,nConfigurations=nConfigurations)
     fieldNames=(fields=fields, extfields=extfields)
-    recette=(lhs=lhs,rhs=rhs,nodes=nodes,centresIndices=centresIndices,numbersOfTheSystem=numbersOfTheSystem,fieldNames=fieldNames,Cˡη=Cˡη,CˡηForce=CˡηForce, recipe_backend=_recipe_backend_name(recipe_backend), recipe_backend_type=string(typeof(recipe_backend)))
+    recette=(lhs=lhs,rhs=rhs,nodes=nodes,centresIndices=centresIndices,numbersOfTheSystem=numbersOfTheSystem,fieldNames=fieldNames,Cˡη=Cˡη,CˡηForce=CˡηForce, testFunctionOrders=testFunctionOrders, hierarchicalTestFunctions=hierarchicalTestFunctions, recipe_backend=_recipe_backend_name(recipe_backend), recipe_backend_type=string(typeof(recipe_backend)))
     return @strdict(recette)
 
 end

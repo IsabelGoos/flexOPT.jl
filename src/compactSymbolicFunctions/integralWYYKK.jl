@@ -42,7 +42,7 @@ function WYYKKIntegralNumerical(params;ImakeReport=true)
     νRefPoints = hasproperty(params, :νRefPoints) ? params.νRefPoints : collect(1:maxNode)
 
     paramsForSymbolic = @strdict orderBspline1D YorderBspline1Dμᶜ YorderBspline1Dμ μᶜs μs maxNode ν νRefPoints lᶜ_nᶜ_max l_n_max ImakeReport
-    paramsForSymbolic["symbolic_endpoint_version"] = "floating_knots_v1"
+    paramsForSymbolic["symbolic_endpoint_version"] = "segmentwise_definite_integrals_v5"
 
     output = myProduceOrLoad(WYYKKIntegralPureSymbolic,paramsForSymbolic,"WYYKKIntegralSymbolic")
 
@@ -177,7 +177,10 @@ function WYYKKIntegralPureSymbolic(params::Dict)
 
 
     WYYKK_integral = integrate(WYYKK,x)
-    continuousAntiDerivativesMaker!(WYYKK_integral)
+    # `WYYKKIntegralNumerical` evaluates F(right)-F(left) independently on
+    # every polynomial segment, so additive integration constants cancel.
+    # Enforcing continuity is unnecessary and fails in SymbolicUtils for some
+    # higher-order B-spline expressions.
     
     reportDir = nothing
 

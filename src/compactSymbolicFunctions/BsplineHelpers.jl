@@ -123,11 +123,11 @@ function constructBsplineFamily(params;simplify_expr=mySimplify,boundary_mode=:g
                 support_segments = support_segment_indices(leftKnot, rightKnot, allNodes)
 
                 for seg in support_segments
-                    b_basis_full.data[seg, idx, slot] = 1
+                    b_basis_full.data[seg, idx, slot] = 1.0
                 end
             end
         else
-            b_basis_full.data[:, :, slot] .= 0
+            b_basis_full.data[:, :, slot] .= 0.0
 
             for idx in 1:numberFunctions-p
                 up = denominators[1, idx, p]
@@ -178,8 +178,8 @@ function constructBsplineFamily(params;simplify_expr=mySimplify,boundary_mode=:g
             left_support = support_segment_indices(refKnots[firstCentral], refKnots[firstCentral + p + 1], allNodes)
             right_support = support_segment_indices(refKnots[lastCentral], refKnots[lastCentral + p + 1], allNodes)
 
-            b_basis_support.data[:, 1, slot] .= 0
-            b_basis_support.data[:, end, slot] .= 0
+            b_basis_support.data[:, 1, slot] .= 0.0
+            b_basis_support.data[:, end, slot] .= 0.0
 
             for seg in left_support
                 seg_local = local_segment_index(seg, rangeSegments)

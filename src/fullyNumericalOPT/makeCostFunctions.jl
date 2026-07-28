@@ -79,6 +79,26 @@ function _residual_numerical_operator(left, right)
     )
 end
 
+function _normalise_residual_rows(operator::MatrixFreeNumericalOperator)
+    row_norm2 = zeros(Float64, operator.size[1])
+    for (row, value) in zip(operator.table.rows, operator.table.vals)
+        row_norm2[row] += abs2(value)
+    end
+    row_scales = map(row_norm2) do norm2
+        norm2 > eps(Float64) ? inv(sqrt(norm2)) : 1.0
+    end
+    vals = similar(operator.table.vals)
+    for index in eachindex(vals)
+        vals[index] = operator.table.vals[index] * row_scales[operator.table.rows[index]]
+    end
+    table = CouplingTable(copy(operator.table.rows), copy(operator.table.cols), vals)
+    normalised = MatrixFreeNumericalOperator(
+        table, operator.size, operator.side, operator.backend,
+        operator.representation, operator.geometry,
+    )
+    return normalised, row_scales
+end
+
 _as_symbol(x::Symbol) = x
 _as_symbol(x::AbstractString) = Symbol(x)
 
@@ -228,6 +248,7 @@ end
 
 function numericalOperatorConstruction(params::Dict)
     @unpack optRec,modelFam,absorbingBoundaries,maskedRegionInSpace=params
+    boundaryConditions = _paramget(params, :boundaryConditions, nothing)
     backend = _paramget(params, :backend, :cpu)
     representation = _paramget(params, :representation, :auto)
     coefficient_type = _paramget(params, :coefficient_type, :auto)
@@ -235,25 +256,50 @@ function numericalOperatorConstruction(params::Dict)
     if !hasproperty(modelFam, :modelName) || modelFam.modelName === nothing
         modelFam = merge(modelFam, (; modelName = "model_" * Dates.format(now(), "yyyymmdd_HHMMSS")))
     end
-    costLHS=numericalOperatorConstruction(optRec,modelFam,"left";absorbingBoundaries=absorbingBoundaries,maskedRegionInSpace=maskedRegionInSpace,backend=backend,representation=representation,coefficient_type=coefficient_type,compatibility_outputs=compatibility_outputs)
-    costRHS=numericalOperatorConstruction(optRec,modelFam,"right";absorbingBoundaries=absorbingBoundaries,maskedRegionInSpace=maskedRegionInSpace,backend=backend,representation=representation,coefficient_type=coefficient_type,compatibility_outputs=compatibility_outputs)
+    freeSurfaceBoundary = nothing
+    cerjanDamping = 0.0053
+    if !isnothing(boundaryConditions)
+        freeSurfaceBoundary = boundaryConditions.free_surface
+        if !isnothing(boundaryConditions.cerjan)
+            isnothing(absorbingBoundaries) ||
+                throw(ArgumentError(
+                    "give Cerjan padding through boundaryConditions or " *
+                    "absorbingBoundaries, not both",
+                ))
+            absorbingBoundaries = cerjan_padding(boundaryConditions.cerjan)
+            cerjanDamping = boundaryConditions.cerjan.damping
+        end
+    end
+    costLHS=numericalOperatorConstruction(optRec,modelFam,"left";absorbingBoundaries=absorbingBoundaries,maskedRegionInSpace=maskedRegionInSpace,freeSurfaceBoundary=freeSurfaceBoundary,cerjanDamping=cerjanDamping,backend=backend,representation=representation,coefficient_type=coefficient_type,compatibility_outputs=compatibility_outputs)
+    costRHS=numericalOperatorConstruction(optRec,modelFam,"right";absorbingBoundaries=absorbingBoundaries,maskedRegionInSpace=maskedRegionInSpace,freeSurfaceBoundary=freeSurfaceBoundary,cerjanDamping=cerjanDamping,backend=backend,representation=representation,coefficient_type=coefficient_type,compatibility_outputs=compatibility_outputs)
     costfunctions=_residual_numerical_operator(costLHS.operator,costRHS.operator)
+    hierarchical = hasproperty(optRec["recette"], :hierarchicalTestFunctions) &&
+        optRec["recette"].hierarchicalTestFunctions
+    rowNormalisation = ones(Float64, costfunctions.size[1])
+    if hierarchical
+        costfunctions, rowNormalisation = _normalise_residual_rows(costfunctions)
+    end
     fieldLHS=costLHS.場
     fieldRHS=costRHS.場
     champsLimité=costRHS.champsLimité
     numericalOperators=(left=costLHS.operator,right=costRHS.operator,residual=costfunctions)
-    numOperators=(costfunctions=costfunctions,fieldLHS=fieldLHS,fieldRHS=fieldRHS,champsLimité=champsLimité,numericalOperators=numericalOperators)
+    numOperators=(costfunctions=costfunctions,fieldLHS=fieldLHS,fieldRHS=fieldRHS,champsLimité=champsLimité,numericalOperators=numericalOperators,rowNormalisation=rowNormalisation,boundaryConditions=boundaryConditions)
     return @strdict(numOperators)
 end
 
 function numericalOperatorConstruction(optRec,modelFam,side;absorbingBoundaries=nothing,maskedRegionInSpace=nothing,
+    freeSurfaceBoundary=nothing,
+    cerjanDamping=0.0053,
     backend=:cpu,        # :cpu, :cuda, :mpi
     representation=:auto, # :matrixfree, :sparse, :blocksparse
     coefficient_type=:auto, # :auto, :float64, :complexf64
     compatibility_outputs=false
 )
 
-    numericalGeometry = prepareNumericalOperatorGeometry(optRec,modelFam,side; absorbingBoundaries, maskedRegionInSpace)
+    numericalGeometry = prepareNumericalOperatorGeometry(
+        optRec, modelFam, side;
+        absorbingBoundaries, maskedRegionInSpace, freeSurfaceBoundary,
+    )
 
     @unpack νWhole, νGeometry, νRelative, localPointsIndices,
         ModelPoints, Models, maskingField, conv,
@@ -279,12 +325,13 @@ function numericalOperatorConstruction(optRec,modelFam,side;absorbingBoundaries=
 
     @unpack NtypeofExpr, NtypeofFields = numbersSide
     NtypeofCoefficientVariables = size(varM, 1)
+    nTestOrderBlocks = ndims(symA) >= 5 ? size(symA, 5) : 1
 
     coefficientRecipes = _compile_coefficient_recipes(symA)
     fieldLinearIndices = LinearIndices(
         (NtypeofFields, activeTimePoints, Tuple(wholeRegionPointsSpace)...)
     )
-    residualLinearIndices = LinearIndices((NtypeofExpr, length(νWhole)))
+    residualLinearIndices = LinearIndices((NtypeofExpr, length(νWhole), nTestOrderBlocks))
 
     rows = Int32[]
     cols = Int32[]
@@ -321,8 +368,8 @@ function numericalOperatorConstruction(optRec,modelFam,side;absorbingBoundaries=
             end
         end
 
-        for iExpr in 1:NtypeofExpr
-            row = residualLinearIndices[iExpr, iTestFunctions]
+        for iTestOrderBlock in 1:nTestOrderBlocks, iExpr in 1:NtypeofExpr
+            row = residualLinearIndices[iExpr, iTestFunctions, iTestOrderBlock]
 
             for iT in 1:iTimeMax
                 for jPoint in νᶜtmpWhole
@@ -348,7 +395,10 @@ function numericalOperatorConstruction(optRec,modelFam,side;absorbingBoundaries=
                                 modelMin,
                                 modelDomainMax,
                             )
-                            boundaryWeight = CerjanBoundaryCondition(distance2)
+                            boundaryWeight = CerjanBoundaryCondition(
+                                distance2;
+                                damping=cerjanDamping,
+                            )
                         end
                     end
 
@@ -357,7 +407,9 @@ function numericalOperatorConstruction(optRec,modelFam,side;absorbingBoundaries=
 
                     for iField in 1:NtypeofFields
                         col = fieldLinearIndices[iField, iT, Tuple(jPoint)...]
-                        recipe = coefficientRecipes[linearjPointTLocal, iField, iExpr, iGeometry]
+                        recipe = nTestOrderBlocks == 1 && ndims(symA) == 4 ?
+                            coefficientRecipes[linearjPointTLocal, iField, iExpr, iGeometry] :
+                            coefficientRecipes[linearjPointTLocal, iField, iExpr, iGeometry, iTestOrderBlock]
                         coef = weight * _evaluate_recipe(recipe, materialMapping)
                         vals = _push_coupling!(rows, cols, vals, row, col, coef)
                     end
@@ -367,7 +419,7 @@ function numericalOperatorConstruction(optRec,modelFam,side;absorbingBoundaries=
     end
 
     table = CouplingTable(rows, cols, vals)
-    nrow = NtypeofExpr * length(νWhole)
+    nrow = NtypeofExpr * length(νWhole) * nTestOrderBlocks
     ncol = NtypeofFields * activeTimePoints * length(νWhole)
     operator = _finalize_numerical_operator(table, nrow, ncol, side, backend, representation, numericalGeometry)
     costFunctions = operator isa SparseNumericalOperator ? operator.matrix : operator
@@ -733,7 +785,14 @@ function numericalOperatorConstruction_too_heavy(optRec,modelFam,side;absorbingB
 
 end
 
-function prepareNumericalOperatorGeometry(optRec, modelFam,side; absorbingBoundaries, maskedRegionInSpace)
+function prepareNumericalOperatorGeometry(
+    optRec,
+    modelFam,
+    side;
+    absorbingBoundaries,
+    maskedRegionInSpace,
+    freeSurfaceBoundary=nothing,
+)
 
 
     @unpack models, modelName, modelPoints = modelFam
@@ -847,18 +906,29 @@ function prepareNumericalOperatorGeometry(optRec, modelFam,side; absorbingBounda
         wholeRegionPoints=modelPoints
         absorbingBoundaries = zeros(Int,2, newD)
     elseif absorbingBoundaries === "CerjanBoundary"
-        wholeRegionPoints=modelPoints
-        absorbingBoundaries = ones(Int,2, newD-1)*CerjanGridPoints
-        absorbingBoundaries=[absorbingBoundaries; 0 0]
-        wholeRegionPoints=modelPoints.+sum(absorbingBoundaries,1) 
+        throw(ArgumentError(
+            "the string \"CerjanBoundary\" is ambiguous; use " *
+            "CerjanBoundarySpec(lower, upper) to choose every side explicitly",
+        ))
     else
-        # absorbingBoundaries should be two column array 
+        # Rows are lower/upper sides; columns are coordinates.
         if size(absorbingBoundaries)[1] !== 2
-            @error "you have to give us the left and right values for absorbing boundaries"
-        elseif size(absorbingBoundaries)[2] !== size(modelPoints)[1] && !timeMarching
-            @error "you have to give us the values for each direction for absorbing boundaries"
-        elseif size(absorbingBoundaries)[2] === size(modelPoints)[1]-1 && timeMarching
-            absorbingBoundaries=[absorbingBoundaries; 0 0]
+            throw(DimensionMismatch(
+                "absorbingBoundaries must have two rows (lower and upper)",
+            ))
+        elseif size(absorbingBoundaries)[2] !== length(modelPoints) && !timeMarching
+            throw(DimensionMismatch(
+                "absorbingBoundaries needs one column per coordinate",
+            ))
+        elseif size(absorbingBoundaries)[2] === length(modelPoints)-1 && timeMarching
+            absorbingBoundaries = hcat(
+                absorbingBoundaries,
+                zeros(Int, 2, 1),
+            )
+        elseif size(absorbingBoundaries)[2] !== length(modelPoints)
+            throw(DimensionMismatch(
+                "absorbingBoundaries needs one column per spatial coordinate",
+            ))
         end
         wholeRegionPoints=modelPoints.+ sum(absorbingBoundaries, dims=1)[:]
     end
@@ -912,6 +982,19 @@ function prepareNumericalOperatorGeometry(optRec, modelFam,side; absorbingBounda
     #since everything is super clumsy, here we make several useful functions to change one coordinate to another
     
     conv=spaceCoordinatesConversionfunctions(absorbingBoundaries[:,1:end-1], newD-1)
+    freeSurfaceBoundaryWhole = if isnothing(freeSurfaceBoundary)
+        nothing
+    else
+        expectedDimension = newD - 1
+        all(length(point) == expectedDimension for point in freeSurfaceBoundary.points) ||
+            throw(DimensionMismatch(
+                "free-surface point dimension differs from the PDE",
+            ))
+        FreeSurfacePointSet(
+            conv.model2whole.(freeSurfaceBoundary.points),
+            copy(freeSurfaceBoundary.normals),
+        )
+    end
     #endregion 
 
     #region
@@ -1010,6 +1093,7 @@ function prepareNumericalOperatorGeometry(optRec, modelFam,side; absorbingBounda
     wholeMax = wholeMax,
     modelMin = modelMin,
     modelDomainMax = modelDomainMax,
+    freeSurfaceBoundary = freeSurfaceBoundaryWhole,
     )
 end
 
