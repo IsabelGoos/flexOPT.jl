@@ -537,9 +537,20 @@ function main()
     skip_fourier = get(ENV, "FLEXOPT_WAVE_SKIP_FOURIER", "0") == "1"
     equations = selected_equations()
     schemes = selected_schemes()
-    convergence_rows, timing_rows = skip_convergence ?
-        (NamedTuple[], NamedTuple[]) :
-        run_convergence(equations, schemes; quick)
+    output_dir = joinpath(FLEXOPT_ROOT, "scripts", "tmp",
+        "famous_equation_periodic_benchmarks")
+    mkpath(output_dir)
+    output_file = joinpath(output_dir, quick ?
+        "wave_fd_vs_opt_quick.jld2" : "wave_fd_vs_opt.jld2")
+    if skip_convergence && isfile(output_file)
+        previous = load(output_file)
+        convergence_rows = get(previous, "convergence_rows", NamedTuple[])
+        timing_rows = get(previous, "timing_rows", NamedTuple[])
+    else
+        convergence_rows, timing_rows = skip_convergence ?
+            (NamedTuple[], NamedTuple[]) :
+            run_convergence(equations, schemes; quick)
+    end
 
     cfl_rows = NamedTuple[]
     cfl_scan_rows = NamedTuple[]
@@ -566,11 +577,6 @@ function main()
         end
     end
 
-    output_dir = joinpath(FLEXOPT_ROOT, "scripts", "tmp",
-        "famous_equation_periodic_benchmarks")
-    mkpath(output_dir)
-    output_file = joinpath(output_dir, quick ?
-        "wave_fd_vs_opt_quick.jld2" : "wave_fd_vs_opt.jld2")
     jldsave(output_file;
         schema_version=SCHEMA_VERSION,
         convergence_rows,
