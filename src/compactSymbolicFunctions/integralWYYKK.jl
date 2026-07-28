@@ -43,7 +43,8 @@ function WYYKKIntegralNumerical(params;ImakeReport=true)
     WνOffset = hasproperty(params, :WνOffset) ? params.WνOffset : 0.0
 
     paramsForSymbolic = @strdict orderBspline1D YorderBspline1Dμᶜ YorderBspline1Dμ μᶜs μs maxNode ν νRefPoints WνOffset lᶜ_nᶜ_max l_n_max ImakeReport
-    paramsForSymbolic["symbolic_endpoint_version"] = "segmentwise_definite_integrals_v5"
+    # v6 deliberately invalidates every pre-half-shift WYYKK result in tmp/.
+    paramsForSymbolic["symbolic_endpoint_version"] = "segmentwise_definite_integrals_v6_shift_modes"
 
     output = myProduceOrLoad(WYYKKIntegralPureSymbolic,paramsForSymbolic,"WYYKKIntegralSymbolic")
 

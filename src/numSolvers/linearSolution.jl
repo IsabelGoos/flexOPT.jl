@@ -63,7 +63,94 @@ function _split_operator_columns(op, NField, NpointsSpace, activeTimePoints, spa
     return sparse(rows, cols, vals, nEq, nCol)
 end
 
-function prepareNumericalLinearSystem(numOperators; T=Float64)
+function _replace_sparse_rows(matrix, replacements::Dict{Int,<:Any})
+    I, J, V = findnz(matrix)
+    replaced = Set(keys(replacements))
+    keep = [!(row in replaced) for row in I]
+    rows, cols, vals = I[keep], J[keep], V[keep]
+    for (row, entries) in replacements
+        for (col, value) in entries
+            iszero(value) && continue
+            push!(rows, row); push!(cols, col); push!(vals, value)
+        end
+    end
+    sparse(rows, cols, vals, size(matrix)...)
+end
+
+function _zero_sparse_rows(matrix, rows_to_zero)
+    I, J, V = findnz(matrix)
+    removed = Set(rows_to_zero)
+    keep = [!(row in removed) for row in I]
+    sparse(I[keep], J[keep], V[keep], size(matrix)...)
+end
+
+function _elastic_free_surface_rows_2d(left, NField, NpointsSpace,
+                                       spaceShape, spacing)
+    geometry = left.geometry
+    boundary = geometry.freeSurfaceBoundary
+    isnothing(boundary) && return Dict{Int,Vector{Tuple{Int,Float64}}}()
+    NField == 2 ||
+        throw(DimensionMismatch("the 2D elastic boundary needs two fields"))
+    length(geometry.Models) >= 3 ||
+        throw(ArgumentError("the elastic model must contain ρ, λ and μ"))
+    left.size[1] == NField * NpointsSpace ||
+        throw(ArgumentError(
+            "free-surface row replacement currently requires one OPT test block",
+        ))
+    λmodel, μmodel = geometry.Models[2], geometry.Models[3]
+    point_linear = LinearIndices(spaceShape)
+    residual_linear = LinearIndices((NField, NpointsSpace))
+    dx, dz = Float64.(spacing)
+    replacements = Dict{Int,Vector{Tuple{Int,Float64}}}()
+
+    for (point, normal) in zip(boundary.points, boundary.normals)
+        model_point = geometry.conv.whole2model(point)
+        λ = Float64(λmodel[model_point])
+        μ = Float64(μmodel[model_point])
+        nx, nz = Float64.(normal)
+        lp = point_linear[point]
+        rows = (residual_linear[1, lp], residual_linear[2, lp])
+        coefficients = (Dict{Int,Float64}(), Dict{Int,Float64}())
+
+        function add_derivative!(equation, field, axis, factor)
+            iszero(factor) && return
+            if axis == 1
+                minus = point - CartesianIndex(1, 0)
+                plus = point + CartesianIndex(1, 0)
+                derivative = ((minus, -inv(2dx)), (plus, inv(2dx)))
+            else
+                # The elastic medium is below the extracted topographic surface.
+                minus = point - CartesianIndex(0, 1)
+                derivative = ((minus, -inv(dz)), (point, inv(dz)))
+            end
+            for (sample_point, weight) in derivative
+                checkbounds(Bool, point_linear, sample_point) ||
+                    throw(BoundsError(point_linear, sample_point))
+                column = point_linear[sample_point] +
+                         (field - 1) * NpointsSpace
+                coefficients[equation][column] =
+                    get(coefficients[equation], column, 0.0) + factor * weight
+            end
+        end
+
+        # t_x = n_x σ_xx + n_z σ_xz
+        add_derivative!(1, 1, 1, nx * (λ + 2μ))
+        add_derivative!(1, 1, 2, nz * μ)
+        add_derivative!(1, 2, 1, nz * μ)
+        add_derivative!(1, 2, 2, nx * λ)
+        # t_z = n_x σ_xz + n_z σ_zz
+        add_derivative!(2, 1, 1, nz * λ)
+        add_derivative!(2, 1, 2, nx * μ)
+        add_derivative!(2, 2, 1, nx * μ)
+        add_derivative!(2, 2, 2, nz * (λ + 2μ))
+        replacements[rows[1]] = [(column, value) for (column, value) in coefficients[1]]
+        replacements[rows[2]] = [(column, value) for (column, value) in coefficients[2]]
+    end
+    replacements
+end
+
+function prepareNumericalLinearSystem(numOperators; T=Float64,
+                                      free_surface_spacing=(1.0, 1.0))
     numericalOperators = _numop_get(numOperators, :numericalOperators)
     numericalOperators === nothing && error("numOperators does not contain numericalOperators")
 
@@ -82,6 +169,20 @@ function prepareNumericalLinearSystem(numOperators; T=Float64)
     A_unknown = _split_operator_columns(left, NField, NpointsSpace, activeTimePoints, spaceShape, :unknown)
     L_known = _split_operator_columns(left, NField, NpointsSpace, activeTimePoints, spaceShape, :knownfield)
     R_force = _split_operator_columns(right, NForceField, NpointsSpace, activeTimePoints, spaceShape, :knownforce)
+
+    boundary_conditions = _numop_get(numOperators, :boundaryConditions)
+    free_surface_rows = Int[]
+    if !isnothing(boundary_conditions) &&
+       !isnothing(boundary_conditions.free_surface) &&
+       length(spaceShape) == 2
+        replacements = _elastic_free_surface_rows_2d(
+            left, NField, NpointsSpace, spaceShape, free_surface_spacing,
+        )
+        free_surface_rows = sort!(collect(keys(replacements)))
+        A_unknown = _replace_sparse_rows(A_unknown, replacements)
+        L_known = _zero_sparse_rows(L_known, free_surface_rows)
+        R_force = _zero_sparse_rows(R_force, free_surface_rows)
+    end
 
     b_template = zeros(promote_type(T, eltype(left.table.vals), eltype(right.table.vals)), left.size[1])
     known_lhs_template = zeros(eltype(b_template), NpointsSpace, NField, NknownTime)
@@ -124,12 +225,13 @@ function prepareNumericalLinearSystem(numOperators; T=Float64)
         NField = NField,
         NForceField = NForceField,
         timePointsUsedForOneStep = timePointsUsedForOneStep,
+        free_surface_rows = free_surface_rows,
     )
 end
 
-function prepareLinearSystem(numOperators; T=Float64)
+function prepareLinearSystem(numOperators; T=Float64, kwargs...)
     if _numop_get(numOperators, :numericalOperators) !== nothing
-        return prepareNumericalLinearSystem(numOperators; T=T)
+        return prepareNumericalLinearSystem(numOperators; T=T, kwargs...)
     end
 
     @unpack costfunctions, fieldLHS, fieldRHS, champsLimité = numOperators
@@ -311,6 +413,67 @@ function prepareConstantMatrix(preparedLin;
 
     factor = lu(A)
     return A, factor
+end
+
+"""
+    propagateLinearSystem(prepared, Nt, dt; sourceFull, output_stride=1)
+
+Run an already prepared OPT time-marching system in memory and return field
+snapshots with layout `(space..., field, output_time)`. `sourceFull` uses
+`(space_point, force_field, source_time)` and must include the extra time
+levels required by the OPT stencil.
+"""
+function propagateLinearSystem(
+    prepared,
+    Nt::Integer,
+    dt::Real;
+    sourceFull,
+    output_stride::Integer=1,
+    initialCondition=0.0,
+)
+    Nt > 0 || throw(ArgumentError("Nt must be positive"))
+    output_stride > 0 || throw(ArgumentError("output_stride must be positive"))
+    minimum_source_times = Nt + prepared.timePointsUsedForOneStep - 1
+    size(sourceFull) == (
+        prepared.NforcePoints,
+        prepared.NForceField,
+        size(sourceFull, 3),
+    ) || throw(DimensionMismatch("sourceFull has incompatible space/field axes"))
+    size(sourceFull, 3) >= minimum_source_times ||
+        throw(DimensionMismatch(
+            "sourceFull needs at least $minimum_source_times time samples",
+        ))
+
+    knownField = fill(Float64(initialCondition), size(prepared.known_lhs_template))
+    knownForce = fill(Float64(initialCondition), size(prepared.known_rhs_template))
+    unknownField = fill(Float64(initialCondition), prepared.NpointsSpace, prepared.NField)
+    _, factor = prepareConstantMatrix(prepared; sparse_output=true)
+    b = copy(prepared.b_template)
+    stored_steps = unique(vcat(0, collect(output_stride:output_stride:Nt), Nt))
+    stored_lookup = Set(stored_steps)
+    snapshots = Array{Float64}[]
+    times = Float64[]
+    push!(snapshots, reshape(copy(unknownField), prepared.spaceShape..., prepared.NField))
+    push!(times, 0.0)
+    nKnownTime = size(knownField, 3)
+
+    for step in 1:Nt
+        knownForce .= sourceFull[:, :, step:step+prepared.timePointsUsedForOneStep-1]
+        prepared.b_fun!(b, vcat(vec(knownField), vec(knownForce)))
+        unknownField .= reshape(factor \ b, prepared.NpointsSpace, prepared.NField)
+        if nKnownTime > 0
+            nKnownTime > 1 &&
+                (knownField[:, :, 1:end-1] .= knownField[:, :, 2:end])
+            knownField[:, :, end] .= unknownField
+        end
+        if step in stored_lookup
+            push!(snapshots,
+                  reshape(copy(unknownField), prepared.spaceShape..., prepared.NField))
+            push!(times, step * Float64(dt))
+        end
+    end
+    history = cat(snapshots...; dims=length(prepared.spaceShape) + 2)
+    (; history, times, stored_steps, dt=Float64(dt))
 end
 
 function timeMarchingSchemeLinear(

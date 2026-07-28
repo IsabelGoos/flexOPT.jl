@@ -41,7 +41,7 @@ module flexOPT
     include("../src/numSolvers/linearSolution.jl")
     include("../src/numSolvers/timeMarchingSchemes.jl")
     include("../src/numSolvers/diffTools.jl")
-    export prepareNumericalOperators,timeMarchingSchemePrepared,prepareLinearSystem,evaluateLinearSystem!,evaluateLinearSystem,timeMarchingSchemeLinear
+    export prepareNumericalOperators,timeMarchingSchemePrepared,prepareLinearSystem,evaluateLinearSystem!,evaluateLinearSystem,timeMarchingSchemeLinear,propagateLinearSystem
 
 
     export quasiNumericalOperatorConstruction,constructingNumericalDiscretisedEquations

@@ -2,6 +2,20 @@ module fieldOutput
 
 export FieldDerivative, FieldExpression, FieldOutputRequest, sample_field_output
 export spatial_derivative, time_derivative, differentiate_field
+export recipe_field_symbols, bind_recipe_fields
+
+function recipe_field_symbols(recipe)
+    haskey(recipe, "recette") ||
+        throw(ArgumentError("the OPT recipe has no \"recette\" entry"))
+    Tuple(recipe["recette"].fieldNames.fields)
+end
+
+function bind_recipe_fields(recipe, arrays)
+    keys = recipe_field_symbols(recipe)
+    length(keys) == length(arrays) ||
+        throw(DimensionMismatch("one array is required for every recipe field"))
+    Dict(key => array for (key, array) in zip(keys, arrays))
+end
 
 """
     FieldDerivative(field, coordinates...)

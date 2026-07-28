@@ -60,25 +60,33 @@ function _construct_test_blocks(
     ordersForSplinesμᶜ, configsTaylorμᶜ,
     Δnum, bigα, varM;
     hierarchical=false,
+    even_order_half_shift_mode=:none,
     kwargs...,
 )
     levels = hierarchical ?
         _hierarchical_test_orders(ordersForSplinesμ.orderBspline) :
         [maximum(ordersForSplinesμ.orderBspline)]
     results = map(levels) do level
-        test_nu_offset = iseven(level) ? 0.5 : 0.0
+        test_nu_offset =
+            iseven(level) && even_order_half_shift_mode != :none ? 0.5 : 0.0
+        interpolation_offset =
+            iseven(level) && even_order_half_shift_mode == :all ? 0.5 : 0.0
         constructAmatrix(
             equationCharacteristics, numbersOfTheSystem,
             _orders_at_test_level(ordersForSplinesμ, level), configsTaylorμ,
             _orders_at_test_level(ordersForSplinesμᶜ, level), configsTaylorμᶜ,
             Δnum, bigα, varM;
             test_nu_offset=test_nu_offset,
+            interpolation_offset=interpolation_offset,
             kwargs...,
         )
     end
     operators = length(results) == 1 ? results[1][1] :
         cat((result[1] for result in results)...; dims=5)
-    offsets = [iseven(level) ? 0.5 : 0.0 for level in levels]
+    offsets = [
+        iseven(level) && even_order_half_shift_mode != :none ? 0.5 : 0.0
+        for level in levels
+    ]
     return operators, results[1][2], results[1][3], levels, offsets
 end
 
@@ -89,6 +97,10 @@ function makeOPTsemiSymbolic(params::Dict)
     taylorInverseMode = Symbol(_opt_paramget(params, :taylorInverseMode, :scaled_svd))
     trialFunctionRefPoints = _opt_paramget(params, :trialFunctionRefPoints, nothing)
     hierarchicalTestFunctions = Bool(_opt_paramget(params, :hierarchicalTestFunctions, false))
+    evenOrderHalfShiftMode =
+        Symbol(_opt_paramget(params, :evenOrderHalfShiftMode, :none))
+    evenOrderHalfShiftMode in (:none, :w_only, :all) ||
+        throw(ArgumentError("evenOrderHalfShiftMode must be :none, :w_only, or :all"))
     nuGeometryMode in (:middle, :all) ||
         throw(ArgumentError("nuGeometryMode must be :middle or :all"))
     Δnum = SVector(Δ)
@@ -112,7 +124,7 @@ function makeOPTsemiSymbolic(params::Dict)
     _,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ=investigateDependencies(equationCharacteristics,numbersOfTheSystem,trialFunctionsCharacteristics,TaylorOptionsμ,TaylorOptionsμᶜ)
     bigα,varM,CartesianDependencies=bigαFinder(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ)
 
-    Ajiννᶜ,Ulocal,Cˡη,testFunctionOrders,testFunctionOffsets=_construct_test_blocks(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM; hierarchical=hierarchicalTestFunctions, recipe_backend=recipe_backend, taylor_inverse_mode=taylorInverseMode, trial_function_ref_points=trialFunctionRefPoints)
+    Ajiννᶜ,Ulocal,Cˡη,testFunctionOrders,testFunctionOffsets=_construct_test_blocks(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM; hierarchical=hierarchicalTestFunctions, even_order_half_shift_mode=evenOrderHalfShiftMode, recipe_backend=recipe_backend, taylor_inverse_mode=taylorInverseMode, trial_function_ref_points=trialFunctionRefPoints)
     lhs=(Ajiννᶜ=Ajiννᶜ,Ulocal=Ulocal,varM=varM,CartesianDependencies=CartesianDependencies)
 
     # compact coefficients for r.h.s. of the equation
@@ -121,7 +133,7 @@ function makeOPTsemiSymbolic(params::Dict)
     numbersOfTheSystem = numbersOfTheSystemR
     _,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ=investigateDependencies(equationCharacteristics,numbersOfTheSystem,trialFunctionsCharacteristics,TaylorOptionsμ,TaylorOptionsμᶜ)
     bigα,varM,CartesianDependencies=bigαFinder(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ)
-    Γjiννᶜ,Flocal,CˡηForce,testFunctionOrdersForce,testFunctionOffsetsForce =_construct_test_blocks(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM; hierarchical=hierarchicalTestFunctions, recipe_backend=recipe_backend, taylor_inverse_mode=taylorInverseMode, trial_function_ref_points=trialFunctionRefPoints)
+    Γjiννᶜ,Flocal,CˡηForce,testFunctionOrdersForce,testFunctionOffsetsForce =_construct_test_blocks(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM; hierarchical=hierarchicalTestFunctions, even_order_half_shift_mode=evenOrderHalfShiftMode, recipe_backend=recipe_backend, taylor_inverse_mode=taylorInverseMode, trial_function_ref_points=trialFunctionRefPoints)
     testFunctionOrders == testFunctionOrdersForce ||
         error("left and right hierarchical test orders differ")
     testFunctionOffsets == testFunctionOffsetsForce ||
@@ -134,7 +146,7 @@ function makeOPTsemiSymbolic(params::Dict)
     nConfigurations=size(nodes)[1]
     numbersOfTheSystem=(numbersOfTheSystemL=numbersOfTheSystemL,numbersOfTheSystemR=numbersOfTheSystemR,nConfigurations=nConfigurations)
     fieldNames=(fields=fields, extfields=extfields)
-    recette=(lhs=lhs,rhs=rhs,nodes=nodes,centresIndices=centresIndices,numbersOfTheSystem=numbersOfTheSystem,fieldNames=fieldNames,Cˡη=Cˡη,CˡηForce=CˡηForce, testFunctionOrders=testFunctionOrders, testFunctionOffsets=testFunctionOffsets, hierarchicalTestFunctions=hierarchicalTestFunctions, recipe_backend=_recipe_backend_name(recipe_backend), recipe_backend_type=string(typeof(recipe_backend)))
+    recette=(lhs=lhs,rhs=rhs,nodes=nodes,centresIndices=centresIndices,numbersOfTheSystem=numbersOfTheSystem,fieldNames=fieldNames,Cˡη=Cˡη,CˡηForce=CˡηForce, testFunctionOrders=testFunctionOrders, testFunctionOffsets=testFunctionOffsets, hierarchicalTestFunctions=hierarchicalTestFunctions, evenOrderHalfShiftMode=evenOrderHalfShiftMode, recipe_backend=_recipe_backend_name(recipe_backend), recipe_backend_type=string(typeof(recipe_backend)))
     return @strdict(recette)
 
 end
@@ -144,7 +156,7 @@ function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSp
     return constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμ,configsTaylorμ,Δnum,bigα,varM;ImakeReport=ImakeReport, recipe_backend=recipe_backend, taylor_inverse_mode=taylor_inverse_mode)
 end
 
-function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend, taylor_inverse_mode=:scaled_svd, trial_function_ref_points=nothing, test_nu_offset=0.0)
+function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend, taylor_inverse_mode=:scaled_svd, trial_function_ref_points=nothing, test_nu_offset=0.0, interpolation_offset=0.0)
     numberGeometries = configsTaylorμ.numberGeometries
     numberGeometries == configsTaylorμᶜ.numberGeometries ||
         throw(ArgumentError("field and material Taylor grids must expose the same ν geometries"))
@@ -172,6 +184,7 @@ function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSp
             taylor_inverse_mode=taylor_inverse_mode,
             trial_function_ref_points=trial_function_ref_points,
             test_nu_offset=test_nu_offset,
+            interpolation_offset=interpolation_offset,
         )
     end
 
@@ -179,7 +192,7 @@ function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSp
     return Ajiννᶜ, results[1][2], results[1][3]
 end
 
-function _constructAmatrix_single(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend, taylor_inverse_mode=:scaled_svd, trial_function_ref_points=nothing, test_nu_offset=0.0)
+function _constructAmatrix_single(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend, taylor_inverse_mode=:scaled_svd, trial_function_ref_points=nothing, test_nu_offset=0.0, interpolation_offset=0.0)
     
     # for the future develpments: ν can move but it's already more or less coded! look at pointν and nGeometry
 
@@ -209,6 +222,15 @@ function _constructAmatrix_single(equationCharacteristics,numbersOfTheSystem,ord
     @show μᶜaxes = availableμᶜaxes[iConfigGeometry]
     @show size(μPoints)
     @show pointν = pointsIndices[middleLinearν] # SVector
+
+    # In :all mode shift both interpolation centres and the centres used to
+    # acquire Cˡη.  This keeps Y and K mutually consistent.
+    if !iszero(interpolation_offset)
+        μPoints = map(p -> p .+ interpolation_offset, μPoints)
+        μᶜPoints = map(p -> p .+ interpolation_offset, μᶜPoints)
+        μaxes = map(axis -> axis .+ interpolation_offset, μaxes)
+        μᶜaxes = map(axis -> axis .+ interpolation_offset, μᶜaxes)
+    end
     
     # this is fully GPU optimised version of ASymbolic 
     

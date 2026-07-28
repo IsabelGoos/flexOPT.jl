@@ -46,9 +46,10 @@ function configuration(
     material_order=field_order,
     taylor_inverse_mode=:scaled_svd,
     hierarchical_test_functions=false,
+    even_order_half_shift_mode=:none,
 )
     return (; name, family, mu_description, points, order_b, supplementary_order,
-        taylor_inverse_mode, hierarchical_test_functions,
+        taylor_inverse_mode, hierarchical_test_functions, even_order_half_shift_mode,
         fieldItpl=interpolation(field_points, field_offset, field_order),
         materItpl=interpolation(material_points, material_offset, material_order))
 end
@@ -80,12 +81,20 @@ function configurations()
             field_points=2, field_offset=1.0,
             material_points=2, material_offset=1.0,
             field_order=1, material_order=1),
-        configuration("OPT4-hierarchical-B1-B2-experimental", 4;
-            mu_description="normalised separate B1 and B2 residuals; parity alignment experimental",
+        configuration("OPT4-hierarchical-B1-B2-half-W", 4;
+            mu_description="normalised B1/B2 residuals; even B2 shifts W only",
             field_points=2, field_offset=1.0,
             material_points=2, material_offset=1.0,
             field_order=1, material_order=1,
-            hierarchical_test_functions=true),
+            hierarchical_test_functions=true,
+            even_order_half_shift_mode=:w_only),
+        configuration("OPT4-hierarchical-B1-B2-half-all", 4;
+            mu_description="normalised B1/B2 residuals; even B2 shifts W, Y and K",
+            field_points=2, field_offset=1.0,
+            material_points=2, material_offset=1.0,
+            field_order=1, material_order=1,
+            hierarchical_test_functions=true,
+            even_order_half_shift_mode=:all),
         configuration("OPT4-field23-material-all4", 4;
             mu_description="implicit field nodes 2:3; material nodes 1:4",
             field_points=2, field_offset=1.0,
@@ -155,6 +164,7 @@ function make_recipe(config; delta=1.0)
         "nuGeometryMode" => :middle,
         "taylorInverseMode" => config.taylor_inverse_mode,
         "hierarchicalTestFunctions" => config.hierarchical_test_functions,
+        "evenOrderHalfShiftMode" => config.even_order_half_shift_mode,
         "recipe_backend" => CPU(),
     ))["recette"]
 end
@@ -379,7 +389,8 @@ function main()
             "FD5",
             "OPT3-central",
             "OPT4-field23-material23",
-            "OPT4-hierarchical-B1-B2-experimental",
+            "OPT4-hierarchical-B1-B2-half-W",
+            "OPT4-hierarchical-B1-B2-half-all",
             "OPT5-ordinary-hat-supp0",
             "OPT5-central",
             "OPT5-hierarchical-B1-B2-B3-experimental",
@@ -391,18 +402,24 @@ function main()
     # Faithful production mode: reconstruct C^l_eta, A and Gamma at each
     # actual Delta. This intentionally does not reuse a Delta=1 recipe.
     prepared = Matrix{Any}(undef, length(sizes), length(configs))
+    recipe_build_seconds = fill(NaN, length(sizes), length(configs))
     for (grid_index, delta) in pairs(dx), (scheme_index, config) in pairs(configs)
         @info "Preparing per-Delta recipe" config=config.name delta
-        prepared[grid_index, scheme_index] =
-            prepare_numeric_recipe(make_recipe(config; delta=delta))
+        recipe_build_seconds[grid_index, scheme_index] = @elapsed begin
+            prepared[grid_index, scheme_index] =
+                prepare_numeric_recipe(make_recipe(config; delta=delta))
+        end
     end
 
     errors = fill(NaN, length(sizes), length(cases), length(configs))
+    solve_seconds = fill(NaN, length(sizes), length(cases), length(configs))
     for (scheme_index, config) in pairs(configs)
         @info "Periodic convergence scheme" config=config.name
         for (case_index, case) in pairs(cases), (grid_index, n) in pairs(sizes)
-            errors[grid_index, case_index, scheme_index] =
-                solve_periodic(prepared[grid_index, scheme_index], n, case)
+            solve_seconds[grid_index, case_index, scheme_index] = @elapsed begin
+                errors[grid_index, case_index, scheme_index] =
+                    solve_periodic(prepared[grid_index, scheme_index], n, case)
+            end
         end
     end
     orders = observed_orders(errors, dx)
@@ -419,7 +436,7 @@ function main()
     output_file = joinpath(
         output_dir, "poisson1d_periodic_convergence_per_delta.jld2")
     jldsave(output_file;
-        sizes, dx, errors, orders,
+        sizes, dx, errors, orders, recipe_build_seconds, solve_seconds,
         scheme_names, case_names,
         scheme_metadata=configs,
         case_metadata=cases,
@@ -428,6 +445,11 @@ function main()
         domain_length=2pi,
         error_definition="norm(T_numerical-T_exact)/sqrt(N)",
         array_layout="errors[grid_index, case_index, scheme_index]",
+        timing_layout=(
+            recipe_build_seconds="recipe_build_seconds[grid_index, scheme_index]",
+            solve_seconds="solve_seconds[grid_index, case_index, scheme_index]",
+        ),
+        timing_definition="wall-clock seconds from Julia @elapsed; current cache state",
         recipe_delta_mode="A, Gamma and C^l_eta reconstructed at every stored dx",
     )
 
