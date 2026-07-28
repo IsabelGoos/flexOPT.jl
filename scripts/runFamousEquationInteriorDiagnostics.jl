@@ -47,6 +47,13 @@ const EQUATIONS = [
         branches=1,
     ),
     (
+        label="SH time 1-D",
+        equation="1DsismoTime",
+        space_dimension=1,
+        has_time=true,
+        branches=1,
+    ),
+    (
         label="Acoustic time 2-D",
         equation="2DacousticTime",
         space_dimension=2,
@@ -221,6 +228,11 @@ function main()
     end
     if get(ENV, "FLEXOPT_DIAGNOSTIC_WAVES_ONLY", "0") == "1"
         equations = filter(equation -> equation.has_time, equations)
+    end
+    if haskey(ENV, "FLEXOPT_DIAGNOSTIC_EQUATIONS")
+        selected_equations = Set(split(ENV["FLEXOPT_DIAGNOSTIC_EQUATIONS"], ","))
+        equations = filter(
+            equation -> equation.equation in selected_equations, equations)
     end
     rows = NamedTuple[]
     output_dir = joinpath(FLEXOPT_ROOT, "scripts", "tmp",

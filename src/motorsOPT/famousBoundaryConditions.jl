@@ -49,9 +49,11 @@ struct CerjanBoundarySpec{N,T<:Real}
     end
 end
 
-Base.@kwdef struct BoundaryConditionSet{F,C}
+Base.@kwdef struct BoundaryConditionSet{F,C,M}
     free_surface::F = nothing
     cerjan::C = nothing
+    material_mask::M = nothing
+    free_surface_mode::Symbol = :traction
 end
 
 cerjan_padding(spec::CerjanBoundarySpec{N}) where {N} =
@@ -181,11 +183,21 @@ Build the complete geometry object passed to `numericalOperatorConstruction`.
 """
 function boundary_geometry(material::AbstractArray{Bool,N},
                            spacing::NTuple{N,<:Real};
-                           cerjan=nothing) where {N}
+                           cerjan=nothing,
+                           free_surface_mode::Symbol=:traction) where {N}
     free = free_surface_points(material, spacing)
     if !isnothing(cerjan)
         cerjan isa CerjanBoundarySpec{N} ||
             throw(DimensionMismatch("Cerjan specification dimension differs"))
     end
-    return BoundaryConditionSet(free_surface=free, cerjan=cerjan)
+    free_surface_mode in (:traction, :dietrich, :pinned_void) ||
+        throw(ArgumentError(
+            "free_surface_mode must be :traction, :dietrich or :pinned_void",
+        ))
+    return BoundaryConditionSet(
+        free_surface=free,
+        cerjan=cerjan,
+        material_mask=BitArray(material),
+        free_surface_mode=free_surface_mode,
+    )
 end

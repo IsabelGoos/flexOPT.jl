@@ -149,6 +149,104 @@ function _elastic_free_surface_rows_2d(left, NField, NpointsSpace,
     replacements
 end
 
+function _pinned_void_rows_2d(left, material_mask, NField,
+                              NpointsSpace, spaceShape)
+    size(material_mask) == Tuple(left.geometry.modelPoints[1:end-1]) ||
+        throw(DimensionMismatch(
+            "boundary material mask and physical model dimensions differ",
+        ))
+    point_linear = LinearIndices(spaceShape)
+    residual_linear = LinearIndices((NField, NpointsSpace))
+    replacements = Dict{Int,Vector{Tuple{Int,Float64}}}()
+    material_shape = size(material_mask)
+    for whole_point in CartesianIndices(spaceShape)
+        raw_model_point = left.geometry.conv.whole2model(whole_point)
+        model_point = CartesianIndex(ntuple(
+            dimension -> clamp(
+                raw_model_point[dimension], 1, material_shape[dimension],
+            ),
+            length(material_shape),
+        ))
+        material_mask[model_point] && continue
+        lp = point_linear[whole_point]
+        for field in 1:NField
+            row = residual_linear[field, lp]
+            column = lp + (field - 1) * NpointsSpace
+            replacements[row] = [(column, 1.0)]
+        end
+    end
+    replacements
+end
+
+function _whole_material_mask_2d(left, material_mask, spaceShape)
+    material_shape = size(material_mask)
+    whole_material = falses(spaceShape)
+    for whole_point in CartesianIndices(spaceShape)
+        raw = left.geometry.conv.whole2model(whole_point)
+        model_point = CartesianIndex(ntuple(
+            d -> clamp(raw[d], 1, material_shape[d]), 2,
+        ))
+        whole_material[whole_point] = material_mask[model_point]
+    end
+    whole_material
+end
+
+function _move_sparse_coefficient!(matrix, row, old_column,
+                                   new_column, sign)
+    value = matrix[row, old_column]
+    iszero(value) && return
+    matrix[row, old_column] = 0.0
+    matrix[row, new_column] += sign * value
+end
+
+function _apply_dietrich_surface_2d(A, L, whole_material, NField)
+    NField == 2 ||
+        throw(DimensionMismatch("Dietrich 2D closure needs two fields"))
+    Npoints = length(whole_material)
+    LI = LinearIndices(whole_material)
+    residual = LinearIndices((NField, Npoints))
+    nKnownTime = div(size(L, 2), Npoints * NField)
+    surface_rows = Int[]
+    directions = (
+        CartesianIndex(-1, 0), CartesianIndex(1, 0),
+        CartesianIndex(0, -1), CartesianIndex(0, 1),
+    )
+    for point in CartesianIndices(whole_material)
+        whole_material[point] || continue
+        p = LI[point]
+        touched = false
+        for direction in directions
+            air = point + direction
+            checkbounds(Bool, whole_material, air) || continue
+            whole_material[air] && continue
+            mirror = point - direction
+            checkbounds(Bool, whole_material, mirror) &&
+                whole_material[mirror] || continue
+            touched = true
+            airp, mirrorp = LI[air], LI[mirror]
+            normalField = direction[1] != 0 ? 1 : 2
+            for equation in 1:NField, field in 1:NField
+                row = residual[equation, p]
+                sign = field == normalField ? 1.0 : -1.0
+                oldA = airp + (field - 1) * Npoints
+                newA = mirrorp + (field - 1) * Npoints
+                _move_sparse_coefficient!(A, row, oldA, newA, sign)
+                for timeSlot in 1:nKnownTime
+                    offset = (timeSlot - 1) * Npoints * NField
+                    _move_sparse_coefficient!(
+                        L, row, oldA + offset, newA + offset, sign,
+                    )
+                end
+            end
+        end
+        if touched
+            append!(surface_rows, (residual[1, p], residual[2, p]))
+        end
+    end
+    dropzeros!(A); dropzeros!(L)
+    return A, L, sort!(unique(surface_rows))
+end
+
 function prepareNumericalLinearSystem(numOperators; T=Float64,
                                       free_surface_spacing=(1.0, 1.0))
     numericalOperators = _numop_get(numOperators, :numericalOperators)
@@ -172,16 +270,43 @@ function prepareNumericalLinearSystem(numOperators; T=Float64,
 
     boundary_conditions = _numop_get(numOperators, :boundaryConditions)
     free_surface_rows = Int[]
+    void_rows = Int[]
     if !isnothing(boundary_conditions) &&
        !isnothing(boundary_conditions.free_surface) &&
        length(spaceShape) == 2
-        replacements = _elastic_free_surface_rows_2d(
-            left, NField, NpointsSpace, spaceShape, free_surface_spacing,
-        )
+        mode = hasproperty(boundary_conditions, :free_surface_mode) ?
+               boundary_conditions.free_surface_mode : :traction
+        replacements = mode === :traction ?
+            _elastic_free_surface_rows_2d(
+                left, NField, NpointsSpace, spaceShape, free_surface_spacing,
+            ) :
+            Dict{Int,Vector{Tuple{Int,Float64}}}()
         free_surface_rows = sort!(collect(keys(replacements)))
+        whole_material = nothing
+        if hasproperty(boundary_conditions, :material_mask) &&
+           !isnothing(boundary_conditions.material_mask)
+            whole_material = _whole_material_mask_2d(
+                left, boundary_conditions.material_mask, spaceShape,
+            )
+            void_replacements = _pinned_void_rows_2d(
+                left, boundary_conditions.material_mask,
+                NField, NpointsSpace, spaceShape,
+            )
+            void_rows = sort!(collect(keys(void_replacements)))
+            merge!(replacements, void_replacements)
+        end
+        constrained_rows = collect(keys(replacements))
         A_unknown = _replace_sparse_rows(A_unknown, replacements)
-        L_known = _zero_sparse_rows(L_known, free_surface_rows)
-        R_force = _zero_sparse_rows(R_force, free_surface_rows)
+        L_known = _zero_sparse_rows(L_known, constrained_rows)
+        R_force = _zero_sparse_rows(R_force, constrained_rows)
+        if mode === :dietrich
+            isnothing(whole_material) &&
+                throw(ArgumentError("Dietrich closure needs a material mask"))
+            A_unknown, L_known, free_surface_rows =
+                _apply_dietrich_surface_2d(
+                    A_unknown, L_known, whole_material, NField,
+                )
+        end
     end
 
     b_template = zeros(promote_type(T, eltype(left.table.vals), eltype(right.table.vals)), left.size[1])
@@ -226,6 +351,7 @@ function prepareNumericalLinearSystem(numOperators; T=Float64,
         NForceField = NForceField,
         timePointsUsedForOneStep = timePointsUsedForOneStep,
         free_surface_rows = free_surface_rows,
+        void_rows = void_rows,
     )
 end
 
