@@ -1035,30 +1035,21 @@ function prepareNumericalOperatorGeometry(
     champsLimité = nothing
     if maskedRegionInSpace === nothing
         maskingField .= 1.0
-    elseif typeof(maskedRegionInSpace) === Array{CartesianIndex,1}
-        champsLimité = Array{Any,2}(undef,NtypeofFields,timePointsUsedForOneStep)
-        for it in 1:timePointsUsedForOneStep
-            for iField in eachindex(fields)
-                newstring=split(string(fields[iField]),"(")[1]*"_mod_limited"*"_t="*string(it)
-                champsLimité[iField,it] = Array{Any,1}(undef,length(maskedRegionInSpace))
-            end
-        end
+    elseif maskedRegionInSpace isa AbstractVector{<:CartesianIndex}
+        # A spatial mask is also used to assemble boundary-only operators.
+        # It must not imply a restricted source field: the symbolic RHS fields
+        # are constructed later, outside this geometry routine.  In particular,
+        # there is no `場` binding here to copy from.  Keep `champsLimité`
+        # unset and let the mask select the operator rows only.
         maskingField .= 0.0
-        tmpIndex=1
         for iSpace in maskedRegionInSpace
             jSpace = conv.model2whole(iSpace)
-            maskingField[jSpace] =1.0
-            for it in 1:timePointsUsedForOneStep
-                for iField in eachindex(fields)
-                    
-                    #tmpChampsLimitéContents= (jSpace,場[iField,it][jSpace])
-                    champsLimité[iField,it][tmpIndex]=場[iField,it][jSpace]
-                end
-            end
-            tmpIndex += 1
+            maskingField[jSpace] = 1.0
         end
     else
-        @error "maskedRegionInSpace should be a 1D array of CartesianIndex (if it is CartesianIndices, you need to collect(Tuple()))"
+        throw(ArgumentError(
+            "maskedRegionInSpace must be a vector of CartesianIndex values",
+        ))
     end
 
     #endregion

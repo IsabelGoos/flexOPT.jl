@@ -53,7 +53,7 @@ Base.@kwdef struct BoundaryConditionSet{F,C,M}
     free_surface::F = nothing
     cerjan::C = nothing
     material_mask::M = nothing
-    free_surface_mode::Symbol = :traction
+    free_surface_mode::Symbol = :zero_traction_flux
 end
 
 cerjan_padding(spec::CerjanBoundarySpec{N}) where {N} =
@@ -89,6 +89,31 @@ function famousBoundaryCondition(::Val{:bc_elasticTractionFree2D})
         coordinates=(x, z, t),
         name=:elasticTractionFree2D,
     )
+end
+
+# Standard famousEquations interface, so the boundary receives its own OPT
+# recipe through makeOPTsemiSymbolic just like a volume PDE.
+function famousEquation(::Val{:eq_elasticTractionFree2D})
+    @variables x z t
+    @variables λ(x,z) μ(x,z) ux(x,z,t) uz(x,z,t)
+    @variables nx(x,z) nz(x,z) gx(x,z,t) gz(x,z,t)
+    divergence = Differential(x)(ux) + Differential(z)(uz)
+    σxx = λ * divergence + 2μ * Differential(x)(ux)
+    σzz = λ * divergence + 2μ * Differential(z)(uz)
+    σxz = μ * (Differential(z)(ux) + Differential(x)(uz))
+    exprs = (
+        σxx * nx + σxz * nz,
+        σxz * nx + σzz * nz,
+    )
+    fields = (ux, uz)
+    vars = (λ, μ, nx, nz)
+    extexprs = (gx, gz)
+    extfields = (gx, gz)
+    extvars = (gx, gz)
+    coordinates = (x, z, t)
+    ∂, ∂² = usefulPartials(coordinates)
+    return exprs, fields, vars, extexprs, extfields, extvars,
+           coordinates, ∂, ∂²
 end
 
 function famousBoundaryCondition(::Val{:bc_elasticTractionFree3D})
@@ -184,15 +209,18 @@ Build the complete geometry object passed to `numericalOperatorConstruction`.
 function boundary_geometry(material::AbstractArray{Bool,N},
                            spacing::NTuple{N,<:Real};
                            cerjan=nothing,
-                           free_surface_mode::Symbol=:traction) where {N}
+                           free_surface_mode::Symbol=:zero_traction_flux) where {N}
     free = free_surface_points(material, spacing)
     if !isnothing(cerjan)
         cerjan isa CerjanBoundarySpec{N} ||
             throw(DimensionMismatch("Cerjan specification dimension differs"))
     end
-    free_surface_mode in (:traction, :dietrich, :pinned_void) ||
+    free_surface_mode in (
+        :zero_traction_flux, :traction, :dietrich, :pinned_void,
+    ) ||
         throw(ArgumentError(
-            "free_surface_mode must be :traction, :dietrich or :pinned_void",
+            "free_surface_mode must be :zero_traction_flux, :traction, " *
+            ":dietrich or :pinned_void",
         ))
     return BoundaryConditionSet(
         free_surface=free,

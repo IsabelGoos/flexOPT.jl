@@ -84,6 +84,140 @@ function _zero_sparse_rows(matrix, rows_to_zero)
     sparse(I[keep], J[keep], V[keep], size(matrix)...)
 end
 
+function _row_replacements_from_matrix(matrix, rows)
+    requested = Set(rows)
+    replacements = Dict(
+        row => Tuple{Int,eltype(matrix)}[] for row in rows
+    )
+    I, J, V = findnz(matrix)
+    for (row, column, value) in zip(I, J, V)
+        row in requested || continue
+        push!(replacements[row], (column, value))
+    end
+    replacements
+end
+
+function _prepared_with_matrices(prepared, A, L, R; kwargs...)
+    function b_fun!(b, knownInputs)
+        nKnownField = length(prepared.known_lhs_template)
+        knownFieldVec = @view knownInputs[1:nKnownField]
+        knownForceVec = @view knownInputs[
+            nKnownField+1:nKnownField+length(prepared.known_rhs_template)
+        ]
+        b .= 0
+        nKnownField > 0 &&
+            mul!(b, L, knownFieldVec, -one(eltype(b)), one(eltype(b)))
+        mul!(b, R, knownForceVec, one(eltype(b)), one(eltype(b)))
+        b
+    end
+    function A_fun!(values, knownInputs)
+        values .= vec(A)
+        values
+    end
+    merge(
+        prepared,
+        (
+            A_unknown=A, L_known=L, R_force=R,
+            A_template=copy(A), b_template=zero(prepared.b_template),
+            var"A_fun!"=A_fun!, var"b_fun!"=b_fun!,
+        ),
+        (; kwargs...),
+    )
+end
+
+"""
+    overlapBoundaryLinearSystem(volume, boundary, points;
+        mode=:additive, boundary_weight=1.0)
+
+Overlap rows assembled from an independent OPT boundary recipe with the
+volume operator at `points`. The default `:additive` mode preserves the
+dynamic volume equation and adds the boundary residual, as in a weak/FEM-like
+assembly. The default preserves the native OPT coefficient scale.
+`boundary_weight=:match_volume` is available as a conditioning diagnostic but
+can over-penalize the boundary in a time-marching problem. `mode=:replace` is retained only for
+diagnostics; replacing a second-order dynamic equation by a first-order
+traction equation can make the current-time matrix singular.
+"""
+function overlapBoundaryLinearSystem(
+    volume,
+    boundary,
+    points;
+    mode::Symbol=:additive,
+    boundary_weight=1.0,
+)
+    volume.spaceShape == boundary.spaceShape ||
+        throw(DimensionMismatch("volume and boundary grids differ"))
+    volume.NField == boundary.NField ||
+        throw(DimensionMismatch("volume and boundary fields differ"))
+    volume.timePointsUsedForOneStep == boundary.timePointsUsedForOneStep ||
+        throw(DimensionMismatch("volume and boundary time stencils differ"))
+    point_linear = LinearIndices(volume.spaceShape)
+    residual = LinearIndices((volume.NField, volume.NpointsSpace))
+    rows = Int[]
+    for point in points
+        lp = point_linear[point]
+        for field in 1:volume.NField
+            push!(rows, residual[field, lp])
+        end
+    end
+    rows = sort!(unique(rows))
+    mode in (:additive, :replace) ||
+        throw(ArgumentError("boundary overlap mode must be :additive or :replace"))
+
+    weights = ones(promote_type(
+        eltype(volume.A_unknown), eltype(boundary.A_unknown),
+    ), size(volume.A_unknown, 1))
+    if boundary_weight === :match_volume
+        for row in rows
+            volume_norm = hypot(
+                norm(volume.A_unknown[row, :]),
+                norm(volume.L_known[row, :]),
+            )
+            boundary_norm = hypot(
+                norm(boundary.A_unknown[row, :]),
+                norm(boundary.L_known[row, :]),
+            )
+            boundary_norm > eps(real(float(one(boundary_norm)))) ||
+                throw(ArgumentError("zero boundary-operator row $row"))
+            weights[row] = volume_norm / boundary_norm
+        end
+    elseif boundary_weight isa Real
+        isfinite(boundary_weight) && boundary_weight > 0 ||
+            throw(ArgumentError("boundary_weight must be positive and finite"))
+        weights[rows] .= boundary_weight
+    else
+        throw(ArgumentError(
+            "boundary_weight must be :match_volume or a positive number",
+        ))
+    end
+
+    if mode === :additive
+        W = spdiagm(0 => weights)
+        A = volume.A_unknown + W * boundary.A_unknown
+        L = volume.L_known + W * boundary.L_known
+        R = volume.R_force
+    else
+        scaled_A = spdiagm(0 => weights) * boundary.A_unknown
+        scaled_L = spdiagm(0 => weights) * boundary.L_known
+        A = _replace_sparse_rows(
+            volume.A_unknown,
+            _row_replacements_from_matrix(scaled_A, rows),
+        )
+        L = _replace_sparse_rows(
+            volume.L_known,
+            _row_replacements_from_matrix(scaled_L, rows),
+        )
+        R = _zero_sparse_rows(volume.R_force, rows)
+    end
+    _prepared_with_matrices(
+        volume, A, L, R;
+        boundary_overlap_rows=rows,
+        boundary_overlap_mode=mode,
+        boundary_overlap_weights=weights[rows],
+        boundary_recipe_system=boundary,
+    )
+end
+
 function _elastic_free_surface_rows_2d(left, NField, NpointsSpace,
                                        spaceShape, spacing)
     geometry = left.geometry
@@ -299,9 +433,9 @@ function prepareNumericalLinearSystem(numOperators; T=Float64,
         A_unknown = _replace_sparse_rows(A_unknown, replacements)
         L_known = _zero_sparse_rows(L_known, constrained_rows)
         R_force = _zero_sparse_rows(R_force, constrained_rows)
-        if mode === :dietrich
+        if mode in (:dietrich, :zero_traction_flux)
             isnothing(whole_material) &&
-                throw(ArgumentError("Dietrich closure needs a material mask"))
+                throw(ArgumentError("zero-traction-flux closure needs a material mask"))
             A_unknown, L_known, free_surface_rows =
                 _apply_dietrich_surface_2d(
                     A_unknown, L_known, whole_material, NField,
