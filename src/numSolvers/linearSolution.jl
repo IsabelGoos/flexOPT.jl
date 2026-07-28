@@ -430,6 +430,7 @@ function propagateLinearSystem(
     sourceFull,
     output_stride::Integer=1,
     initialCondition=0.0,
+    blowup_limit=Inf,
 )
     Nt > 0 || throw(ArgumentError("Nt must be positive"))
     output_stride > 0 || throw(ArgumentError("output_stride must be positive"))
@@ -449,10 +450,12 @@ function propagateLinearSystem(
     unknownField = fill(Float64(initialCondition), prepared.NpointsSpace, prepared.NField)
     _, factor = prepareConstantMatrix(prepared; sparse_output=true)
     b = copy(prepared.b_template)
-    stored_steps = unique(vcat(0, collect(output_stride:output_stride:Nt), Nt))
-    stored_lookup = Set(stored_steps)
+    requested_steps = unique(vcat(0, collect(output_stride:output_stride:Nt), Nt))
+    stored_lookup = Set(requested_steps)
+    stored_steps = Int[0]
     snapshots = Array{Float64}[]
     times = Float64[]
+    stopped_early = false
     push!(snapshots, reshape(copy(unknownField), prepared.spaceShape..., prepared.NField))
     push!(times, 0.0)
     nKnownTime = size(knownField, 3)
@@ -461,6 +464,12 @@ function propagateLinearSystem(
         knownForce .= sourceFull[:, :, step:step+prepared.timePointsUsedForOneStep-1]
         prepared.b_fun!(b, vcat(vec(knownField), vec(knownForce)))
         unknownField .= reshape(factor \ b, prepared.NpointsSpace, prepared.NField)
+        amplitude = maximum(abs, unknownField)
+        if !isfinite(amplitude) || amplitude > blowup_limit
+            @warn "stopping OPT propagation" step amplitude blowup_limit
+            stopped_early = true
+            break
+        end
         if nKnownTime > 0
             nKnownTime > 1 &&
                 (knownField[:, :, 1:end-1] .= knownField[:, :, 2:end])
@@ -470,10 +479,11 @@ function propagateLinearSystem(
             push!(snapshots,
                   reshape(copy(unknownField), prepared.spaceShape..., prepared.NField))
             push!(times, step * Float64(dt))
+            push!(stored_steps, step)
         end
     end
     history = cat(snapshots...; dims=length(prepared.spaceShape) + 2)
-    (; history, times, stored_steps, dt=Float64(dt))
+    (; history, times, stored_steps, dt=Float64(dt), stopped_early)
 end
 
 function timeMarchingSchemeLinear(

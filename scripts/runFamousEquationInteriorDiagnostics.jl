@@ -81,19 +81,46 @@ interpolation(points, offset, order) = (
 const RECIPES = [
     (
         name="OPT3",
-        points=3,
-        order_b=1,
+        points_space=3,
+        points_time=3,
+        order_b_space=1,
+        order_b_time=1,
         supplementary_order=2,
-        interpolation=interpolation(1, 1.0, -1),
+        field_points_space=1,
+        field_offset_space=1.0,
+        field_points_time=1,
+        field_offset_time=1.0,
+        interpolation_order=-1,
         hierarchical=false,
         half_shift_mode=:none,
     ),
     (
-        name="OPT5-ordinary-hat-supp0",
-        points=5,
-        order_b=1,
+        name="OPT5space-OPT3time-ordinary-hat-supp0",
+        points_space=5,
+        points_time=3,
+        order_b_space=1,
+        order_b_time=1,
         supplementary_order=0,
-        interpolation=interpolation(1, 2.0, -1),
+        field_points_space=1,
+        field_offset_space=2.0,
+        field_points_time=1,
+        field_offset_time=1.0,
+        interpolation_order=-1,
+        hierarchical=false,
+        half_shift_mode=:none,
+    ),
+    (
+        name="OPT5space-OPT5time-ordinary-hat-supp0-occasional",
+        points_space=5,
+        points_time=5,
+        order_b_space=1,
+        order_b_time=1,
+        supplementary_order=0,
+        field_points_space=1,
+        field_offset_space=2.0,
+        field_points_time=1,
+        field_offset_time=2.0,
+        interpolation_order=-1,
         hierarchical=false,
         half_shift_mode=:none,
     ),
@@ -102,19 +129,22 @@ const RECIPES = [
 function make_parameters(equation, recipe; delta=1.0)
     dimensions = equation.space_dimension + equation.has_time
     Δ = Tuple(fill(Float64(delta), dimensions))
-    points_time = equation.has_time ? recipe.points : 1
-    order_time = equation.has_time ? recipe.order_b : 0
-    field_itpl = merge(recipe.interpolation, (
-        ptsTime=equation.has_time ? recipe.interpolation.ptsTime : 1,
-        offsetTime=equation.has_time ? recipe.interpolation.offsetTime : 0.0,
-        YorderBtime=equation.has_time ? recipe.interpolation.YorderBtime : -1,
-    ))
+    points_time = equation.has_time ? recipe.points_time : 1
+    order_time = equation.has_time ? recipe.order_b_time : 0
+    field_itpl = (
+        ptsSpace=recipe.field_points_space,
+        ptsTime=equation.has_time ? recipe.field_points_time : 1,
+        offsetSpace=recipe.field_offset_space,
+        offsetTime=equation.has_time ? recipe.field_offset_time : 0.0,
+        YorderBspace=recipe.interpolation_order,
+        YorderBtime=equation.has_time ? recipe.interpolation_order : -1,
+    )
     return Dict{String,Any}(
         "famousEquationType" => equation.equation,
         "Δ" => Δ,
         "orderBtime" => order_time,
-        "orderBspace" => recipe.order_b,
-        "pointsInSpace" => recipe.points,
+        "orderBspace" => recipe.order_b_space,
+        "pointsInSpace" => recipe.points_space,
         "pointsInTime" => points_time,
         "supplementaryOrder" => recipe.supplementary_order,
         "fieldItpl" => field_itpl,
@@ -181,9 +211,29 @@ end
 
 function main()
     quick = get(ENV, "FLEXOPT_DIAGNOSTIC_QUICK", "0") == "1"
-    recipes = quick ? RECIPES[1:1] : RECIPES
+    opt3_only = get(ENV, "FLEXOPT_DIAGNOSTIC_OPT3_ONLY", "0") == "1"
+    include_time5 = get(ENV, "FLEXOPT_DIAGNOSTIC_INCLUDE_TIME5", "0") == "1"
+    recipes = quick || opt3_only ? RECIPES[1:1] :
+        (include_time5 ? RECIPES : RECIPES[1:2])
     equations = quick ? EQUATIONS[1:3] : EQUATIONS
+    if get(ENV, "FLEXOPT_DIAGNOSTIC_MAX_2D", "0") == "1"
+        equations = filter(equation -> equation.space_dimension <= 2, equations)
+    end
+    if get(ENV, "FLEXOPT_DIAGNOSTIC_WAVES_ONLY", "0") == "1"
+        equations = filter(equation -> equation.has_time, equations)
+    end
     rows = NamedTuple[]
+    output_dir = joinpath(FLEXOPT_ROOT, "scripts", "tmp",
+        "famous_equation_interior_diagnostics")
+    mkpath(output_dir)
+    mode_label = quick ? "quick" :
+        (get(ENV, "FLEXOPT_DIAGNOSTIC_WAVES_ONLY", "0") == "1" ?
+            "waves" : "all")
+    dimension_label =
+        get(ENV, "FLEXOPT_DIAGNOSTIC_MAX_2D", "0") == "1" ? "_max2d" : ""
+    time_label = include_time5 ? "_with_time5" : "_time3_default"
+    output_file = joinpath(output_dir,
+        "recipe_construction_$(mode_label)$(dimension_label)$(time_label).jld2")
 
     for equation in equations, recipe in recipes
         @info "Interior recipe diagnostic" equation=equation.equation recipe=recipe.name
@@ -198,19 +248,17 @@ function main()
             equation.label, recipe.name, row.status,
             row.build_seconds, row.gamma_nonzero)
         row.status == "failed" && println("  ", row.error)
+        # Preserve completed rows even when a later 3-D construction is
+        # interrupted or exhausts the practical time/memory budget.
+        jldsave(output_file;
+            rows,
+            equations=EQUATIONS,
+            recipes=RECIPES,
+            boundary_mode="none; local interior recipe only",
+            diagnostic_stage="construction and Gamma-presence smoke test",
+        )
     end
 
-    output_dir = joinpath(FLEXOPT_ROOT, "scripts", "tmp",
-        "famous_equation_interior_diagnostics")
-    mkpath(output_dir)
-    output_file = joinpath(output_dir, "recipe_construction.jld2")
-    jldsave(output_file;
-        rows,
-        equations=EQUATIONS,
-        recipes=RECIPES,
-        boundary_mode="none; local interior recipe only",
-        diagnostic_stage="construction and Gamma-presence smoke test",
-    )
     println("Saved: ", output_file)
     return output_file
 end
