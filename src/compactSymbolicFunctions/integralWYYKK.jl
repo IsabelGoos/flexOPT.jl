@@ -311,7 +311,10 @@ function save_report_plot(
     fig = plotCompactSymbolicFunctions(csf, slots; N=N, Δxval=Δxval, ylabel=ylabel)
     ax = content(fig[1, 1])
     ax.title = title
-    save(filepath, fig)
+    # The interactive notebook normally keeps GLMakie active, but GLMakie
+    # cannot serialize vector PDF output. Select CairoMakie for this export
+    # without changing the notebook's active display backend.
+    save(filepath, fig; backend=CairoMakie)
     return filepath
 end
 
