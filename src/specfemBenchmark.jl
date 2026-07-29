@@ -6,6 +6,7 @@ export specfem2d_root, specfem2d_status
 export write_specfem2d_tomography, write_specfem2d_interfaces
 export prepare_specfem2d_case
 export run_specfem2d_case, read_specfem2d_trace
+export find_specfem2d_traces
 export waveform_metrics, plot_solver_benchmark
 
 const DEFAULT_SPECFEM2D_ROOT =
@@ -163,6 +164,8 @@ function prepare_specfem2d_case(
     duration=30.0,
     dt=0.001,
     f0=1.0,
+    source_factor=1.0e10,
+    source_angle=0.0,
     nx_elements=max(4, cld(length(x) - 1, 4)),
     nz_elements=max(4, cld(length(z) - 1, 4)),
 )
@@ -233,6 +236,9 @@ function prepare_specfem2d_case(
     source_text = _set_parameter(source_text, "xs", source.x)
     source_text = _set_parameter(source_text, "zs", source.z)
     source_text = _set_parameter(source_text, "f0", f0)
+    source_text = _set_parameter(source_text, "source_type", 1)
+    source_text = _set_parameter(source_text, "anglesource", source_angle)
+    source_text = _set_parameter(source_text, "factor", source_factor)
     write(joinpath(data_path, "SOURCE"), source_text)
 
     (
@@ -243,6 +249,8 @@ function prepare_specfem2d_case(
         interfaces=interfaces_file,
         par_file=joinpath(data_path, "Par_file"),
         source_file=joinpath(data_path, "SOURCE"),
+        source_factor=Float64(source_factor),
+        source_angle=Float64(source_angle),
         surface=surface_z,
         nx_elements,
         nz_elements,
@@ -288,6 +296,28 @@ function read_specfem2d_trace(path)
     end
     isempty(values) && throw(ArgumentError("no trace samples found in $path"))
     (; time=first.(values), values=last.(values), path=abspath(path))
+end
+
+"""
+    find_specfem2d_traces(output_directory; component=:z)
+
+Return one SPECFEM2D ASCII velocity trace per station. SPECFEM uses different
+channel prefixes depending on the output convention (`CXZ`, `FXZ`, ...), so
+selection is based on the physical final component rather than a fixed prefix.
+"""
+function find_specfem2d_traces(output_directory; component::Symbol=:z)
+    component in (:x, :z) ||
+        throw(ArgumentError("SPECFEM2D component must be :x or :z"))
+    suffix = component === :x ? "XX.semv" : "XZ.semv"
+    paths = filter(
+        path -> endswith(basename(path), suffix),
+        readdir(output_directory; join=true),
+    )
+    sort!(paths; by=path -> begin
+        fields = split(basename(path), '.')
+        length(fields) >= 4 ? fields[2] : basename(path)
+    end)
+    paths
 end
 
 function _linear_sample(time, values, query)

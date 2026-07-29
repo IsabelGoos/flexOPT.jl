@@ -1,6 +1,9 @@
 # flexOPT.jl
 
-flexOPT.jl is implemented in Julia. The notebooks in `notebooks/` provide demos and exploratory workflows.
+flexOPT.jl is implemented in Julia. For a long time, it has been a hand-made code but from July 2026, I allowed myself to use Codex-chatGPT to prepare notebooks, to debug and to harmonise the codes.
+Actually flexOPT.jl can read various types of Earth and planet 1D models, pictures and propose optimally accurate operators (Fuji & Duretz 2025) for any (linear) partial differential equations with boundary conditions, and compute neutrino oscillation using realistic flux and detector effects.
+
+The notebooks in `notebooks/` provide demos and exploratory workflows.
 
 ## Reproducible setup
 

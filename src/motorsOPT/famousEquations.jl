@@ -303,6 +303,28 @@ function famousEquation(::Val{:eq_2DsismoTimeIsoHetero})
     return exprs, fields, vars, extexprs, extfields, extvars, coordinates, ∂, ∂²
 end
 
+
+function famousEquation(::Val{:eq_2DsismoTimeIsoHeteroSingleForce})
+
+    # 2D heterogeneous elastic wave equation with a Cartesian body force.
+    @variables ρ(x,y) (C(x,y))[1:2,1:2,1:2,1:2] u(x,y,t)[1:2] (f(x,y,t))[1:2]
+    @variables λ(x,y) μ(x,y)
+    δ=Matrix(I, 2, 2) # Kronecker's delta
+    @tullio C[i,j,k,l] := λ * δ[i,j]*δ[k,l]+μ*(δ[i,k]*δ[j,l]+δ[i,l]*δ[j,k])
+    @tullio traction[i] := ∇₂[j](C[i,j,k,l]*∇₂[l](u[k]))
+    exprs = ρ* ∂t²(u[1]) - traction[1], ρ* ∂t²(u[2]) - traction[2]
+
+    fields=u[1], u[2]
+    vars = ρ, λ, μ
+
+    extexprs = f[1], f[2]
+    extfields = f[1], f[2]
+    extvars = f[1], f[2]
+    coordinates =(x,y,t)
+    ∂, ∂² = usefulPartials(coordinates)
+    return exprs, fields, vars, extexprs, extfields, extvars, coordinates, ∂, ∂²
+end
+
 function famousEquation(::Val{:eq_2DacousticTime})
     # 2D wave equation with double couple source
     @variables v(x,y)  u(x,y,t) f(x,y,t)

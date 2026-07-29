@@ -190,11 +190,24 @@ function step_elastic_wave_2d!(state::ElasticWaveState2D{T}) where T
 end
 
 function add_ricker_source!(state::ElasticWaveState2D, index::CartesianIndex{2};
-                            f0, t0=1.5/f0, amplitude=1, component=:z)
+                            f0, t0=1.5/f0, amplitude=1, component=:z,
+                            source_kind::Symbol=:acceleration)
     checkbounds(state.ux, index)
     state.material[index] || throw(ArgumentError("source must be in elastic material"))
     a = π * f0 * (state.time - t0)
-    value = eltype(state.ux)(amplitude * state.dt^2 * (1 - 2a^2) * exp(-a^2))
+    ricker = (1 - 2a^2) * exp(-a^2)
+    acceleration = if source_kind === :acceleration
+        amplitude * ricker
+    elseif source_kind === :force
+        # A 2-D simulation represents a unit-thickness slice. `amplitude`
+        # is therefore a line force in N/m and rho*dx*dz is the lumped
+        # nodal mass per metre out of plane.
+        dx, dz = state.spacing
+        amplitude * ricker / (state.ρ[index] * dx * dz)
+    else
+        throw(ArgumentError("source_kind must be :acceleration or :force"))
+    end
+    value = eltype(state.ux)(state.dt^2 * acceleration)
     field = component === :x ? state.ux :
             component === :z ? state.uz :
             throw(ArgumentError("component must be :x or :z"))
