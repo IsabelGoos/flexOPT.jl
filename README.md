@@ -1,6 +1,6 @@
-# flexOPT
+# flexOPT.jl
 
-flexOPT is implemented in Julia. The notebooks in `notebooks/` provide demos and exploratory workflows.
+flexOPT.jl is implemented in Julia. The notebooks in `notebooks/` provide demos and exploratory workflows.
 
 ## Reproducible setup
 
