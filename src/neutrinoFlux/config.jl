@@ -1,85 +1,233 @@
-"""
-    NeutrinoFluxParameters
+# ===================================================
+# Abstract type and model-specific parameter structs
+# ===================================================
 
-Configuration shared by the Honda and Daemonflux backends. The selected
-backend itself is stored separately in `DEFAULT_NUFLUX_MODEL`, following the
-same pattern as `GeoPoints.DEFAULT_PLANET`.
+abstract type NeutrinoFluxParameters end
+
 """
-Base.@kwdef struct NeutrinoFluxParameters
-    flux_mode::Symbol = :total
-    return_uncertainties::Bool = false
-    params_df::Union{Nothing,Dict{String,Any}} = nothing
-    location_hf::Symbol = :gran_sasso
-    season_hf::Symbol = :all_year
-    angles_separation_hf::Symbol = :averaged_ϕ
-    mountain_overburden_hf::Symbol = :without
-    solar_activity_hf::Symbol = :minimum
+    HondaParameters
+
+Parameters specific to the Honda atmospheric neutrino flux model tables.
+"""
+Base.@kwdef struct HondaParameters <: NeutrinoFluxParameters
+    location::Symbol            = :gran_sasso
+    season::Symbol              = :all_year
+    angles_separation::Symbol   = :averaged_ϕ
+    solar_activity::Symbol      = :minimum
+    mountain_overburden::Symbol = :without
 end
 
-const DEFAULT_NUFLUX_MODEL = Ref(:Honda)
-const DEFAULT_NUFLUX_PARAMS = Ref(NeutrinoFluxParameters())
+"""
+    DaemonfluxParameters
 
-const LOCATION_MAPPING = Dict{Symbol,String}(
-    :kamioka => "kam",
+Parameters specific to the Daemonflux model with continuous parameters.
+"""
+Base.@kwdef struct DaemonfluxParameters <: NeutrinoFluxParameters
+    flux_mode::Symbol          = :total
+    return_uncertainties::Bool = false
+    params::Union{Nothing,Dict{String,Any}} = nothing
+end
+
+"""
+    ChengParameters
+
+Parameters specific to the Cheng atmospheric neutrino flux model tables.
+"""
+Base.@kwdef struct ChengParameters <: NeutrinoFluxParameters
+    location::Symbol            = :gran_sasso
+    season::Symbol              = :all_year
+    angles_separation::Symbol   = :averaged_ϕ
+    solar_activity::Symbol      = :minimum
+    muon_propa_earth::Symbol    = :with 
+
+end
+
+# =============================================================
+# Default values container (model + model-specific parameters)
+# =============================================================
+
+const DEFAULT_NUFLUX_MODEL  = Ref{Symbol}(:Honda)
+const DEFAULT_NUFLUX_PARAMS = Ref{NeutrinoFluxParameters}(HondaParameters())
+
+# =========
+# Mappings
+# =========
+
+const LOCATION_MAPPING_H = Dict{Symbol, String}(
+    :kamioka    => "kam",
     :gran_sasso => "grn",
-    :sudbury => "sno",
-    :frejus => "frj",
-    :ino => "ino",
+    :sudbury    => "sno",
+    :frejus     => "frj",
+    :ino        => "ino",
     :south_pole => "spl",
     :pythasalmi => "pyh",
-    :homestake => "hms",
-    :juno => "juno",
+    :homestake  => "hms",
+    :juno       => "juno",
+
 )
 
-const SEASON_MAPPING = Dict{Symbol,String}(
-    :all_year => "ally",
+const LOCATION_MAPPING_C = Dict{Symbol, String}(
+    :juno       => ["juno", "JUNO"],
+    :superk     => ["kam", "SK"],
+    :orca       => ["orca", "KM3NeT-ORCA"],
+    :icecube    => ["icecube", "IceCube"],
+    :dune       => ["dune", "DUNE"],
+    :trident    => ["trident", "TRIDENT"],
+    :cjpl       => ["jp", "CJPL"],
+)
+
+const SEASON_MAPPING = Dict{Symbol, String}(
+    :all_year  => "ally",
     :march_may => "0305",
-    :june_aug => "0608",
-    :sept_nov => "0911",
-    :dec_feb => "1202",
+    :june_aug  => "0608",
+    :sept_nov  => "0911",
+    :dec_feb   => "1202",
 )
 
-const ANGLES_MAPPING = Dict{Symbol,String}(
-    :variable_ϕ => "20-12",
-    :averaged_ϕ => "20-01",
+const ANGLES_MAPPING = Dict{Symbol, String}(
+    :variable_ϕ  => "20-12",
+    :averaged_ϕ  => "20-01",
     :averaged_ϕθ => "01-01",
 )
 
-const MOUNTAIN_MAPPING = Dict{Symbol,String}(
-    :with => "-mtn",
+const SOLAR_MAPPING = Dict{Symbol, String}(
+    :minimum => ["solmin", "solar-min"],
+    :maximum => ["solmax", "solar-max"],
+)
+
+const MOUNTAIN_MAPPING = Dict{Symbol, String}(
+    :with    => "-mtn",
     :without => "",
 )
 
-const SOLAR_MAPPING = Dict{Symbol,String}(
-    :minimum => "solmin",
-    :maximum => "solmax",
+const MUON_PROPA_MAPPING = Dict{Symbol, String}(
+    :with    => "with-muon-in-earth",
+    :without => "without-muon-in-earth",
 )
 
+# =====================================
+# Allowed parameter keys in Daemonflux
+# =====================================
+
+const DAEMONFLUX_ALLOWED_KEYS = Set{String}([
+    "K+_158G", "K+_2P", "K+_31G", "K-_158G", "K-_2P", "K-_31G",
+    "n_158G", "n_2P", "p_158G", "p_2P",
+    "pi+_158G", "pi+_20T", "pi+_2P", "pi+_31G",
+    "pi-_158G", "pi-_20T", "pi-_2P", "pi-_31G",
+    "GSF_1", "GSF_2", "GSF_3", "GSF_4", "GSF_5", "GSF_6"
+])
+
+# ===================
+# Validation methods
+# ===================
+
 function _validate_neutrino_flux_model(model::Symbol)
-    model in (:Honda, :Daemonflux) ||
-        throw(ArgumentError("model must be :Honda or :Daemonflux; got $model"))
+    model in (:Honda, :Daemonflux, :Cheng) ||
+        throw(ArgumentError("Model must be :Honda, :Daemonflux, or :Cheng; got $model ."))
     return model
 end
 
-function _validate_neutrino_flux_parameters(params::NeutrinoFluxParameters)
-    params.flux_mode in (:total, :conventional) ||
-        throw(ArgumentError("flux_mode must be :total or :conventional"))
-    haskey(LOCATION_MAPPING, params.location_hf) ||
-        throw(ArgumentError("unsupported Honda location: $(params.location_hf)"))
-    haskey(SEASON_MAPPING, params.season_hf) ||
-        throw(ArgumentError("unsupported Honda season: $(params.season_hf)"))
-    haskey(ANGLES_MAPPING, params.angles_separation_hf) ||
-        throw(ArgumentError(
-            "unsupported Honda angular separation: $(params.angles_separation_hf)",
-        ))
-    haskey(MOUNTAIN_MAPPING, params.mountain_overburden_hf) ||
-        throw(ArgumentError(
-            "mountain_overburden_hf must be :with or :without",
-        ))
-    haskey(SOLAR_MAPPING, params.solar_activity_hf) ||
-        throw(ArgumentError("solar_activity_hf must be :minimum or :maximum"))
-    return params
+function _validate_parameters(p::HondaParameters)
+    haskey(LOCATION_MAPPING_H, p.location) ||
+        throw(ArgumentError("Unsupported Honda location: $(p.location) ."))
+    haskey(SEASON_MAPPING, p.season) ||
+        throw(ArgumentError("Unsupported Honda season: $(p.season) ."))
+    haskey(ANGLES_MAPPING, p.angles_separation) ||
+        throw(ArgumentError("Unsupported Honda angular separation: $(p.angles_separation) ."))
+    haskey(SOLAR_MAPPING, p.solar_activity) ||
+        throw(ArgumentError("Solar_activity must be :minimum or :maximum ."))
+    haskey(MOUNTAIN_MAPPING, p.mountain_overburden) ||
+        throw(ArgumentError("Mountain_overburden must be :with or :without ."))
+    return p
 end
+
+function _validate_parameters(p::DaemonfluxParameters)
+    p.flux_mode in (:total, :conventional) ||
+        throw(ArgumentError("Flux_mode must be :total or :conventional ."))
+    p.return_uncertainties in (false, true) ||
+        throw(ArgumentError("Return_uncertainties must be true or false ."))
+    if !isnothing(p.params)
+        for key in keys(p.params)
+            key_str = string(key)
+            if !(key_str in DAEMONFLUX_ALLOWED_KEYS)
+                throw(ArgumentError("Invalid Daemonflux parameter: $(repr(key)) ."))
+            end
+        end
+    end
+    return p
+end
+
+function _validate_parameters(p::ChengParameters)
+    haskey(LOCATION_MAPPING_C, p.location) ||
+        throw(ArgumentError("Unsupported Honda location: $(p.location) ."))
+    haskey(SEASON_MAPPING, p.season) ||
+        throw(ArgumentError("Unsupported Honda season: $(p.season) ."))
+    haskey(ANGLES_MAPPING, p.angles_separation) ||
+        throw(ArgumentError("Unsupported Honda angular separation: $(p.angles_separation) ."))
+    haskey(SOLAR_MAPPING, p.solar_activity) ||
+        throw(ArgumentError("Solar_activity must be :minimum or :maximum ."))
+    haskey(MUON_PROPA_MAPPING, p.muon_propa_earth) ||
+        throw(ArgumentError("Muon_propa_earth must be :with or :without ."))
+    return p
+end
+
+# ================================
+# Configuration and state setters
+# ================================
+
+"""
+    set_default_neutrino_flux!(params::NeutrinoFluxParameters, model::Symbol)
+
+Set default parameters to update the default model.
+No network access or flux computation occurs here.
+"""
+function set_default_neutrino_flux!(
+    model::Symbol = DEFAULT_NUFLUX_MODEL[],
+    params::NeutrinoFluxParameters = DEFAULT_NUFLUX_PARAMS[] 
+)
+    validated_m = _validate_neutrino_flux_model(model)
+    validated_p = _validate_parameters(params)
+
+    @assert validated_m == _model_symbol_from_type(params) "The model :$validated_m and the parameters type $(typeof(params)) do not go together."
+
+    DEFAULT_NUFLUX_MODEL[]  = validated_m
+    DEFAULT_NUFLUX_PARAMS[] = validated_p
+    return (; model=DEFAULT_NUFLUX_MODEL[], params=DEFAULT_NUFLUX_PARAMS[])
+end
+
+_model_symbol_from_type(::HondaParameters)      = :Honda
+_model_symbol_from_type(::DaemonfluxParameters) = :Daemonflux
+_model_symbol_from_type(::ChengParameters)      = :Cheng
+
+"""
+    set_default_neutrino_flux!()
+
+Return the current default model symbol and parameters without making changes.
+"""
+function set_default_neutrino_flux!()
+    @info "No parameters provided. Returning current default configuration."
+    return (; model=DEFAULT_NUFLUX_MODEL[], params=DEFAULT_NUFLUX_PARAMS[])
+end
+
+"""
+    set_default_neutrino_flux!(raw::AbstractDict)
+
+Return the current default model symbol and parameters without making changes.
+"""
+function set_default_neutrino_flux!(raw::AbstractDict)
+    if isempty(raw)
+        @info "Received empty dictionary. Returning current default configuration."
+        return set_default_neutrino_flux!()
+    end
+end
+
+
+
+
+
+
+
+
 
 _parameters_namedtuple(params::NeutrinoFluxParameters) = (;
     flux_mode=params.flux_mode,
@@ -92,52 +240,8 @@ _parameters_namedtuple(params::NeutrinoFluxParameters) = (;
     solar_activity_hf=params.solar_activity_hf,
 )
 
-function configure_neutrino_flux(
-    params::NeutrinoFluxParameters=DEFAULT_NUFLUX_PARAMS[];
-    kwargs...,
-)
-    updated = NeutrinoFluxParameters(;
-        merge(_parameters_namedtuple(params), NamedTuple(kwargs))...,
-    )
-    return _validate_neutrino_flux_parameters(updated)
-end
 
-"""
-    set_default_neutrino_flux!(model::Symbol; kwargs...)
 
-Select the default atmospheric-flux backend, analogous to
-`set_default_planet!`. Optional keywords update the typed default parameters.
-No network access or flux computation occurs here.
-"""
-function set_default_neutrino_flux!(model::Symbol; kwargs...)
-    validated_model = _validate_neutrino_flux_model(model)
-    updated_params = isempty(kwargs) ?
-                     DEFAULT_NUFLUX_PARAMS[] :
-                     configure_neutrino_flux(; kwargs...)
-    # Commit both values only after every validation has succeeded.
-    DEFAULT_NUFLUX_MODEL[] = validated_model
-    DEFAULT_NUFLUX_PARAMS[] = updated_params
-    return (;
-        model=DEFAULT_NUFLUX_MODEL[],
-        params=DEFAULT_NUFLUX_PARAMS[],
-    )
-end
-
-"""
-    set_default_neutrino_flux!(params::NeutrinoFluxParameters; model)
-
-Replace the typed default parameter set, optionally changing the model.
-"""
-function set_default_neutrino_flux!(
-    params::NeutrinoFluxParameters;
-    model::Symbol=DEFAULT_NUFLUX_MODEL[],
-)
-    validated_model = _validate_neutrino_flux_model(model)
-    validated_params = _validate_neutrino_flux_parameters(params)
-    DEFAULT_NUFLUX_MODEL[] = validated_model
-    DEFAULT_NUFLUX_PARAMS[] = validated_params
-    return (; model=DEFAULT_NUFLUX_MODEL[], params=DEFAULT_NUFLUX_PARAMS[])
-end
 
 const _NUFLUX_PARAMETER_KEYS = Set(fieldnames(NeutrinoFluxParameters))
 const _NUFLUX_CONFIGURATION_KEYS = union(_NUFLUX_PARAMETER_KEYS, Set((:model,)))
