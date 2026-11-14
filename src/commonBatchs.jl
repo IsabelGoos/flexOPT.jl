@@ -16,6 +16,7 @@ module commonBatchs
     export SVector, @SVector
     export interpolateField,getCartesianField
     export myProduceOrLoad,lazyProduceOrLoad, @strdict, @unpack
+    export cacheKeyExtras
     export getColorPalette, regenerataionColorMap, color2Float
     export safeget, _paramget
     export var2string,reinterpolateArrayMembers,expandVectors,string_as_varname

@@ -9,6 +9,8 @@
 *_local.ipynb
 *_local
 
+__pycache__/*
+_to_delete/*
 *.mp4
 *.pdf
 *.txt
@@ -21,6 +23,7 @@ deps/
 logs/
 data/
 
+tmp/*
 */tmp/*
 *.jld2
 # VSCode

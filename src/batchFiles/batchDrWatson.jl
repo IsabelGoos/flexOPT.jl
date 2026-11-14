@@ -13,6 +13,17 @@ function hash_parameters(params)
     return bytes2hex(sha1(str))[1:8]  # Short hash
 end
 
+"""
+    cacheKeyExtras(functionName, paramDict)
+
+Hook for cached functions whose result depends on something that is not
+visible in `paramDict` (e.g. the backend actually selected at run time).
+Return `nothing` (default: the cache key is exactly the parameters, as before)
+or a Dict of extra `String => value` entries; they are added to the parameters
+before hashing and stored with the result.
+"""
+cacheKeyExtras(functionName, paramDict) = nothing
+
 function myProduceOrLoad(functionName,paramDict,directoryName::String)
     output=myProduceOrLoad(functionName,paramDict,directoryName,directoryName)
     return output
@@ -22,10 +33,13 @@ function myProduceOrLoad(functionName,paramDict,directoryName::String,prefixName
 
     # this is myFunction strategy for DrWatson
 
-    hash_id = hash_parameters(paramDict)
-    
+    extras = cacheKeyExtras(functionName, paramDict)
+    keyDict = extras === nothing ? paramDict :
+        merge(Dict{String,Any}(paramDict), Dict{String,Any}(extras))
+    hash_id = hash_parameters(keyDict)
 
-    newDict = Dict{String,Any}(paramDict)
+
+    newDict = Dict{String,Any}(keyDict)
     newDict["hash_id"] = hash_id
     
     output, _ = produce_or_load(functionName,newDict,datadir(directoryName);filename = config -> "$(prefixName)_$(newDict["hash_id"])")

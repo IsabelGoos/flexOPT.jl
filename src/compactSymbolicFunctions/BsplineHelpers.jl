@@ -177,14 +177,14 @@ function constructBsplineFamily(params;simplify_expr=mySimplify,boundary_mode=:g
         if correction_truncation && p > 0
             left_support = support_segment_indices(refKnots[firstCentral], refKnots[firstCentral + p + 1], allNodes)
             right_support = support_segment_indices(refKnots[lastCentral], refKnots[lastCentral + p + 1], allNodes)
-
-            b_basis_support.data[:, 1, slot] .= 0.0
-            b_basis_support.data[:, end, slot] .= 0.0
+            overlapping_support = intersect(left_support, right_support)
 
             for seg in left_support
+                seg in overlapping_support && continue
                 seg_local = local_segment_index(seg, rangeSegments)
                 isnothing(seg_local) && continue
 
+                b_basis_support.data[seg_local, 1, slot] = 0.0
                 s = zero(Num)
                 for j in 2:numberFunctionsOriginal
                     s += b_basis_support.data[seg_local, j, slot]
@@ -193,15 +193,24 @@ function constructBsplineFamily(params;simplify_expr=mySimplify,boundary_mode=:g
             end
 
             for seg in right_support
+                seg in overlapping_support && continue
                 seg_local = local_segment_index(seg, rangeSegments)
                 isnothing(seg_local) && continue
 
+                b_basis_support.data[seg_local, end, slot] = 0.0
                 s = zero(Num)
                 for j in 1:numberFunctionsOriginal-1
                     s += b_basis_support.data[seg_local, j, slot]
                 end
                 b_basis_support.data[seg_local, end, slot] = simplify_expr(1 - s)
             end
+
+            # With only a few available points (notably a clipped 3×2
+            # surface stencil), left and right boundary supports may occupy
+            # the same physical segment. The unmodified ghost-basis functions
+            # already form the local partition of unity there. Applying both
+            # one-sided residual corrections would erase one endpoint, so the
+            # overlapping segment is deliberately left unchanged.
         end
     end
 

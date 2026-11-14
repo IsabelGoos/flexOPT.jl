@@ -39,12 +39,20 @@ end
 function WYYKKIntegralNumerical(params;ImakeReport=true)
     
     @unpack orderBspline1D, YorderBspline1Dμᶜ, YorderBspline1Dμ, μᶜs, μs, maxNode, ν, lᶜ_nᶜ_max, l_n_max, Δ = params
+    WDerivativeOrder = hasproperty(params, :WDerivativeOrder) ?
+        Int(params.WDerivativeOrder) : 0
+    WDerivativeOrder >= 0 ||
+        throw(ArgumentError("WDerivativeOrder must be non-negative"))
     νRefPoints = hasproperty(params, :νRefPoints) ? params.νRefPoints : collect(1:maxNode)
     WνOffset = hasproperty(params, :WνOffset) ? params.WνOffset : 0.0
+    integrationBounds = hasproperty(params, :integrationBounds) ?
+        params.integrationBounds : nothing
 
-    paramsForSymbolic = @strdict orderBspline1D YorderBspline1Dμᶜ YorderBspline1Dμ μᶜs μs maxNode ν νRefPoints WνOffset lᶜ_nᶜ_max l_n_max ImakeReport
-    # v6 deliberately invalidates every pre-half-shift WYYKK result in tmp/.
-    paramsForSymbolic["symbolic_endpoint_version"] = "segmentwise_definite_integrals_v6_shift_modes"
+    paramsForSymbolic = @strdict orderBspline1D YorderBspline1Dμᶜ YorderBspline1Dμ μᶜs μs maxNode ν νRefPoints WνOffset WDerivativeOrder lᶜ_nᶜ_max l_n_max ImakeReport
+    # v8 also invalidates two-sided truncated B-spline families: overlapping
+    # boundary supports retain their original partition instead of receiving
+    # two incompatible one-sided corrections.
+    paramsForSymbolic["symbolic_endpoint_version"] = "segmentwise_definite_integrals_v8_overlap_partition"
 
     output = myProduceOrLoad(WYYKKIntegralPureSymbolic,paramsForSymbolic,"WYYKKIntegralSymbolic")
 
@@ -54,6 +62,14 @@ function WYYKKIntegralNumerical(params;ImakeReport=true)
 
     nodes = WYYKK_integral.nodes
     numericalNodes = Δ .* nodes
+    numericalBounds = if isnothing(integrationBounds)
+        (first(numericalNodes), last(numericalNodes))
+    else
+        bounds = Tuple(Float64.(collect(integrationBounds)))
+        length(bounds) == 2 && bounds[1] < bounds[2] ||
+            throw(ArgumentError("integrationBounds must be an increasing pair"))
+        (Δ * bounds[1], Δ * bounds[2])
+    end
     numNodes = WYYKK_integral.numberNodes
     x = WYYKK_integral.variables[1]
     Δx = WYYKK_integral.variables[2]
@@ -65,8 +81,12 @@ function WYYKKIntegralNumerical(params;ImakeReport=true)
         tmpCoef = 0.0
         # since 
         for ι in 1:numNodes-1
-            xLeft = numericalNodes[ι]
-            xRight = numericalNodes[ι+1]
+            # Build W from its centred reference family, but integrate only
+            # over the physical portion of its support. No exterior field
+            # value participates in this clipped natural-weak integral.
+            xLeft = max(numericalNodes[ι], numericalBounds[1])
+            xRight = min(numericalNodes[ι+1], numericalBounds[2])
+            xRight > xLeft || continue
             expr = tmpAntiDerivative[ι]
             rightValue = Symbolics.value(Symbolics.substitute(expr, Dict(x => xRight, Δx => Δ)))
             leftValue = Symbolics.value(Symbolics.substitute(expr, Dict(x => xLeft, Δx => Δ)))
@@ -92,6 +112,14 @@ function WYYKKIntegralPureSymbolic(params::Dict)
     @unpack orderBspline1D,YorderBspline1Dμᶜ,YorderBspline1Dμ,μᶜs,μs,maxNode,ν,lᶜ_nᶜ_max,l_n_max,ImakeReport = params
     νRefPoints = haskey(params, "νRefPoints") ? params["νRefPoints"] : collect(1:maxNode)
     WνOffset = haskey(params, "WνOffset") ? params["WνOffset"] : 0.0
+    WDerivativeOrder = haskey(params, "WDerivativeOrder") ?
+        Int(params["WDerivativeOrder"]) : 0
+    WDerivativeOrder >= 0 ||
+        throw(ArgumentError("WDerivativeOrder must be non-negative"))
+    (WDerivativeOrder == 0 || orderBspline1D >= WDerivativeOrder) || throw(ArgumentError(
+        "test-function derivative order $WDerivativeOrder requires " *
+        "orderBspline1D >= $WDerivativeOrder; got $orderBspline1D",
+    ))
     Wν = ν .+ WνOffset
     WνRefPoints = νRefPoints .+ WνOffset
 
@@ -154,6 +182,9 @@ function WYYKKIntegralPureSymbolic(params::Dict)
     # explicit B-spline slot. This keeps -1 out of array indexing.
     function bspline_factor(family, iFunction, derivSlot, spec)
         if spec.kind == :indicator
+            derivSlot == 1 || throw(ArgumentError(
+                "indicator test functions do not provide derivatives",
+            ))
             is_indicator_family(family) || error("Expected :indicator family for order $(spec.order)")
             return 1
         end
@@ -161,14 +192,18 @@ function WYYKKIntegralPureSymbolic(params::Dict)
         return family.b.data[:, iFunction, derivSlot, bspline_order_slot(spec)]
     end
 
-    derivSlot = 1 # no derivatives
+    # Derivative slot 1 stores W itself, slot 2 stores ∂W, etc.  Existing
+    # strong/weighted-residual recipes keep the default WDerivativeOrder=0.
+    derivSlot = WDerivativeOrder + 1
 
     for iν ∈ eachindex(ν), iμᶜ ∈ eachindex(μᶜs), iμ ∈ eachindex(μs), lᶜ_nᶜ ∈ 0:lᶜ_nᶜ_max, l_n ∈ 0:l_n_max
         l_n_slot=l_n+1
         lᶜ_nᶜ_slot = lᶜ_nᶜ+1
         Wfactor = bspline_factor(Wν, iν, derivSlot, orderSpecν)
-        YcFactor = bspline_factor(Yμᶜ, iμᶜ, derivSlot, orderSpecμᶜ)
-        YFactor = bspline_factor(Yμ, iμ, derivSlot, orderSpecμ)
+        # Integration by parts differentiates only the test function.  The
+        # field/material interpolation families remain undifferentiated.
+        YcFactor = bspline_factor(Yμᶜ, iμᶜ, 1, orderSpecμᶜ)
+        YFactor = bspline_factor(Yμ, iμ, 1, orderSpecμ)
         WYYKK.data[:,1,l_n_slot, lᶜ_nᶜ_slot, iμ, iμᶜ,iν] = mySimplify(
             Wfactor .*
             YcFactor .*

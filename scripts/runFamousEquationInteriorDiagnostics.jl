@@ -6,7 +6,7 @@
 
 import Pkg
 
-const FLEXOPT_ROOT = normpath(joinpath(@__DIR__, ".."))
+const FLEXOPT_ROOT = get(ENV, "FLEXOPT_ROOT", normpath(joinpath(@__DIR__, "..")))
 Pkg.activate(FLEXOPT_ROOT)
 
 using JLD2
@@ -20,118 +20,13 @@ include(joinpath(FLEXOPT_ROOT, "src", "commonBatchs.jl"))
 include(joinpath(FLEXOPT_ROOT, "src", "planet1D.jl"))
 include(joinpath(FLEXOPT_ROOT, "src", "GeoPoints.jl"))
 include(joinpath(FLEXOPT_ROOT, "src", "flexOPT.jl"))
+include(joinpath(@__DIR__, "famousEquationBenchmarkMatrix.jl"))
 
 using .commonBatchs
 using .flexOPT
+using .FamousEquationBenchmarkMatrix
 
-const EQUATIONS = [
-    (
-        label="Poisson 1-D",
-        equation="1DpoissonHetero",
-        space_dimension=1,
-        has_time=false,
-        branches=1,
-    ),
-    (
-        label="Poisson 2-D",
-        equation="2DpoissonHetero",
-        space_dimension=2,
-        has_time=false,
-        branches=1,
-    ),
-    (
-        label="SH frequency 1-D",
-        equation="1DsismoFreqHetero",
-        space_dimension=1,
-        has_time=false,
-        branches=1,
-    ),
-    (
-        label="SH time 1-D",
-        equation="1DsismoTime",
-        space_dimension=1,
-        has_time=true,
-        branches=1,
-    ),
-    (
-        label="Acoustic time 2-D",
-        equation="2DacousticTime",
-        space_dimension=2,
-        has_time=true,
-        branches=1,
-    ),
-    (
-        label="Elastic time 2-D",
-        equation="2DsismoTimeIsoHeteroForce",
-        space_dimension=2,
-        has_time=true,
-        branches=2,
-    ),
-    (
-        label="Elastic time 3-D",
-        equation="3DsismoTimeIso",
-        space_dimension=3,
-        has_time=true,
-        branches=3,
-    ),
-]
-
-interpolation(points, offset, order) = (
-    ptsSpace=points,
-    ptsTime=points,
-    offsetSpace=offset,
-    offsetTime=offset,
-    YorderBspace=order,
-    YorderBtime=order,
-)
-
-const RECIPES = [
-    (
-        name="OPT3",
-        points_space=3,
-        points_time=3,
-        order_b_space=1,
-        order_b_time=1,
-        supplementary_order=2,
-        field_points_space=1,
-        field_offset_space=1.0,
-        field_points_time=1,
-        field_offset_time=1.0,
-        interpolation_order=-1,
-        hierarchical=false,
-        half_shift_mode=:none,
-    ),
-    (
-        name="OPT5space-OPT3time-ordinary-hat-supp0",
-        points_space=5,
-        points_time=3,
-        order_b_space=1,
-        order_b_time=1,
-        supplementary_order=0,
-        field_points_space=1,
-        field_offset_space=2.0,
-        field_points_time=1,
-        field_offset_time=1.0,
-        interpolation_order=-1,
-        hierarchical=false,
-        half_shift_mode=:none,
-    ),
-    (
-        name="OPT5space-OPT5time-ordinary-hat-supp0-occasional",
-        points_space=5,
-        points_time=5,
-        order_b_space=1,
-        order_b_time=1,
-        supplementary_order=0,
-        field_points_space=1,
-        field_offset_space=2.0,
-        field_points_time=1,
-        field_offset_time=2.0,
-        interpolation_order=-1,
-        hierarchical=false,
-        half_shift_mode=:none,
-    ),
-]
+const RECIPES = SCHEMES
 
 function make_parameters(equation, recipe; delta=1.0)
     dimensions = equation.space_dimension + equation.has_time
@@ -139,12 +34,20 @@ function make_parameters(equation, recipe; delta=1.0)
     points_time = equation.has_time ? recipe.points_time : 1
     order_time = equation.has_time ? recipe.order_b_time : 0
     field_itpl = (
-        ptsSpace=recipe.field_points_space,
-        ptsTime=equation.has_time ? recipe.field_points_time : 1,
-        offsetSpace=recipe.field_offset_space,
-        offsetTime=equation.has_time ? recipe.field_offset_time : 0.0,
-        YorderBspace=recipe.interpolation_order,
-        YorderBtime=equation.has_time ? recipe.interpolation_order : -1,
+        ptsSpace=recipe.field_points,
+        ptsTime=1,
+        offsetSpace=recipe.field_offset,
+        offsetTime=equation.has_time ? 1.0 : 0.0,
+        YorderBspace=recipe.field_order,
+        YorderBtime=-1,
+    )
+    material_itpl = (
+        ptsSpace=recipe.material_points,
+        ptsTime=1,
+        offsetSpace=recipe.material_offset,
+        offsetTime=equation.has_time ? 1.0 : 0.0,
+        YorderBspace=recipe.material_order,
+        YorderBtime=-1,
     )
     return Dict{String,Any}(
         "famousEquationType" => equation.equation,
@@ -155,10 +58,11 @@ function make_parameters(equation, recipe; delta=1.0)
         "pointsInTime" => points_time,
         "supplementaryOrder" => recipe.supplementary_order,
         "fieldItpl" => field_itpl,
-        "materItpl" => field_itpl,
+        "materItpl" => material_itpl,
         "nuGeometryMode" => :middle,
-        "hierarchicalTestFunctions" => recipe.hierarchical,
-        "evenOrderHalfShiftMode" => recipe.half_shift_mode,
+        "hierarchicalTestFunctions" => false,
+        "evenOrderHalfShiftMode" => :none,
+        "taylorInverseMode" => recipe.taylor_inverse_mode,
         "recipe_backend" => CPU(),
     )
 end
@@ -218,10 +122,7 @@ end
 
 function main()
     quick = get(ENV, "FLEXOPT_DIAGNOSTIC_QUICK", "0") == "1"
-    opt3_only = get(ENV, "FLEXOPT_DIAGNOSTIC_OPT3_ONLY", "0") == "1"
-    include_time5 = get(ENV, "FLEXOPT_DIAGNOSTIC_INCLUDE_TIME5", "0") == "1"
-    recipes = quick || opt3_only ? RECIPES[1:1] :
-        (include_time5 ? RECIPES : RECIPES[1:2])
+    recipes = quick ? filter(r -> r.name in ("FD3", "OPT3-center"), RECIPES) : RECIPES
     equations = quick ? EQUATIONS[1:3] : EQUATIONS
     if get(ENV, "FLEXOPT_DIAGNOSTIC_MAX_2D", "0") == "1"
         equations = filter(equation -> equation.space_dimension <= 2, equations)
@@ -234,6 +135,10 @@ function main()
         equations = filter(
             equation -> equation.equation in selected_equations, equations)
     end
+    if haskey(ENV, "FLEXOPT_DIAGNOSTIC_SCHEMES")
+        selected_recipes = Set(split(ENV["FLEXOPT_DIAGNOSTIC_SCHEMES"], ","))
+        recipes = filter(recipe -> recipe.name in selected_recipes, recipes)
+    end
     rows = NamedTuple[]
     output_dir = joinpath(FLEXOPT_ROOT, "scripts", "tmp",
         "famous_equation_interior_diagnostics")
@@ -243,7 +148,7 @@ function main()
             "waves" : "all")
     dimension_label =
         get(ENV, "FLEXOPT_DIAGNOSTIC_MAX_2D", "0") == "1" ? "_max2d" : ""
-    time_label = include_time5 ? "_with_time5" : "_time3_default"
+    time_label = "_time3_hierarchical"
     output_file = joinpath(output_dir,
         "recipe_construction_$(mode_label)$(dimension_label)$(time_label).jld2")
 

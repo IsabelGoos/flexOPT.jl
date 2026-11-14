@@ -5,7 +5,7 @@
 # its own flexOPT recipe: no Δ=1 reference recipe is rescaled afterwards.
 
 import Pkg
-const FLEXOPT_ROOT = normpath(joinpath(@__DIR__, ".."))
+const FLEXOPT_ROOT = get(ENV, "FLEXOPT_ROOT", normpath(joinpath(@__DIR__, "..")))
 Pkg.activate(FLEXOPT_ROOT)
 
 using JLD2
@@ -26,11 +26,20 @@ using .commonBatchs
 using .flexOPT
 using .FamousEquationBenchmarkMatrix
 
-const WAVE_EQUATIONS = filter(e -> e.physics != :poisson, EQUATIONS)
-const FIELD_WAVE = (2.0, 1.0)
-const BASE = (rho=2.0, mu=3.0, lambda=4.0, velocity=2.0)
+const WAVE_EQUATIONS = EQUATIONS
+const FIELD_WAVE = (2.0, 1.0, 1.0)
+const BASE = (rho=2.0, mu=3.0, lambda=4.0, velocity=2.0, kappa=2.5)
 const CFL_RUN = 0.18
-const SCHEMA_VERSION = "wave_periodic_fd_opt_v2"
+const SCHEMA_VERSION = "wave_periodic_fd_opt_v3_form_audited"
+const BENCHMARK_FORM = Symbol(lowercase(get(ENV, "FLEXOPT_WAVE_FORM", "weak")))
+BENCHMARK_FORM in (:weak, :strong) ||
+    error("FLEXOPT_WAVE_FORM must be weak or strong")
+const SYSTEMATIC_SCENARIOS = Set((
+    "homogeneous",
+    "same_wave_phase0",
+    "long_material_phase0",
+    "short_material_phase0",
+))
 
 value_for(spec::Number, ::Symbol, default) = Float64(spec)
 value_for(spec::NamedTuple, key::Symbol, default) =
@@ -65,14 +74,17 @@ function characteristic_speed(equation)
     error("Unsupported physics $(equation.physics)")
 end
 
-function interpolation(scheme, equation)
+function interpolation(scheme, equation, target::Symbol)
+    points = target === :field ? scheme.field_points : scheme.material_points
+    offset = target === :field ? scheme.field_offset : scheme.material_offset
+    order = target === :field ? scheme.field_order : scheme.material_order
     return (
-        ptsSpace=1,
+        ptsSpace=points,
         ptsTime=1,
-        offsetSpace=(scheme.points_space - 1) / 2,
+        offsetSpace=offset,
         offsetTime=equation.has_time ? (scheme.points_time - 1) / 2 : 0.0,
-        YorderBspace=scheme.interpolation_order,
-        YorderBtime=equation.has_time ? scheme.interpolation_order : -1,
+        YorderBspace=order,
+        YorderBtime=-1,
     )
 end
 
@@ -80,6 +92,11 @@ function make_recipe(equation, scheme, dx; dt=nothing)
     deltas = equation.has_time ?
         Tuple(vcat(fill(Float64(dx), equation.space_dimension), Float64(dt))) :
         Tuple(fill(Float64(dx), equation.space_dimension))
+    # A box-car test (orderB=-1) has a distributional derivative and cannot be
+    # passed through the natural-weak WYYKK volume integral.  convFD therefore
+    # remains the same strong reference in both campaigns; the form comparison
+    # applies to the differentiable OPT test functions.
+    recipe_form = scheme.family === :convFD ? :strong : BENCHMARK_FORM
     params = Dict{String,Any}(
         "famousEquationType" => equation.equation,
         "Δ" => deltas,
@@ -88,12 +105,15 @@ function make_recipe(equation, scheme, dx; dt=nothing)
         "pointsInSpace" => scheme.points_space,
         "pointsInTime" => equation.has_time ? scheme.points_time : 1,
         "supplementaryOrder" => scheme.supplementary_order,
-        "fieldItpl" => interpolation(scheme, equation),
-        "materItpl" => interpolation(scheme, equation),
+        "fieldItpl" => interpolation(scheme, equation, :field),
+        "materItpl" => interpolation(scheme, equation, :material),
         "nuGeometryMode" => :middle,
         "hierarchicalTestFunctions" => false,
         "evenOrderHalfShiftMode" => :none,
+        "taylorInverseMode" => scheme.taylor_inverse_mode,
         "recipe_backend" => CPU(),
+        # Never let a benchmark depend silently on the mutable package default.
+        "variationalForm" => recipe_form,
     )
     return makeOPTsemiSymbolic(params)["recette"]
 end
@@ -147,6 +167,7 @@ function material_mapping(numeric, equation, scenario, x)
         mu, _ = material_value_gradient(scenario, :mu, spatial_x, d)
         lambda, _ = material_value_gradient(scenario, :lambda, spatial_x, d)
         velocity, _ = material_value_gradient(scenario, :velocity, spatial_x, d)
+        kappa, _ = material_value_gradient(scenario, :kappa, spatial_x, d)
         for variable_index in axes(numeric.lhs_varm, 1)
             symbol = numeric.lhs_varm[variable_index, local_index]
             text = string(symbol)
@@ -158,6 +179,8 @@ function material_mapping(numeric, equation, scenario, x)
                 mapping[symbol] = lambda
             elseif startswith(text, "v") || occursin("v(", text)
                 mapping[symbol] = velocity
+            elseif occursin("κ", text)
+                mapping[symbol] = kappa
             elseif occursin("ω", text)
                 mapping[symbol] = 0.8 * sqrt(BASE.mu / BASE.rho) *
                     norm(FIELD_WAVE[1:d])
@@ -178,8 +201,13 @@ function manufactured(equation, scenario, coordinates; branch=:P)
     mu, gradmu = material_value_gradient(scenario, :mu, x, d)
     lambda, gradlambda = material_value_gradient(scenario, :lambda, x, d)
     velocity, _ = material_value_gradient(scenario, :velocity, x, d)
+    kappa, gradkappa = material_value_gradient(scenario, :kappa, x, d)
 
-    if equation.physics == :sh_frequency
+    if equation.physics == :poisson
+        theta = dot(k, x)
+        u = [cos(theta)]
+        f = [-dot(gradkappa, k) * sin(theta) - kappa * k2 * cos(theta)]
+    elseif equation.physics == :sh_frequency
         theta = dot(k, x)
         omega = 0.8 * sqrt(BASE.mu / BASE.rho) * norm(k)
         u = [cos(theta)]
@@ -198,7 +226,15 @@ function manufactured(equation, scenario, coordinates; branch=:P)
         f = [(-omega^2 + velocity^2 * k2) * cos(theta)]
     elseif equation.physics == :elastic
         khat = k / norm(k)
-        p = branch == :P ? khat : [-khat[2], khat[1]]
+        if branch == :P
+            p = khat
+        elseif d == 2
+            p = [-khat[2], khat[1]]
+        else
+            reference = abs(khat[1]) < 0.8 ? [1.0, 0.0, 0.0] : [0.0, 1.0, 0.0]
+            s1 = normalize(cross(khat, reference))
+            p = branch == :S2 ? normalize(cross(khat, s1)) : s1
+        end
         speed = branch == :P ?
             sqrt((BASE.lambda + 2 * BASE.mu) / BASE.rho) :
             sqrt(BASE.mu / BASE.rho)
@@ -214,6 +250,120 @@ function manufactured(equation, scenario, coordinates; branch=:P)
         error("Unsupported physics")
     end
     return u, f
+end
+
+function explicit_residual_error(equation, scenario, n, dx, dt; branch=:P)
+    residual2 = 0.0
+    force2 = 0.0
+    count = 0
+    d = equation.space_dimension
+    spatial_shift(x, axis, amount) = begin
+        shifted = copy(x)
+        shifted[axis] += amount
+        shifted
+    end
+    field_at(x) = first(manufactured(equation, scenario, x; branch))
+
+    for index in sample_indices(n, equation)
+        centre = periodic_coordinates(index, n, dx, dt, equation)
+        u0, f0 = manufactured(equation, scenario, centre; branch)
+        discrete = zeros(Float64, length(u0))
+
+        if equation.physics in (:poisson, :sh_frequency, :sh_time)
+            flux_divergence = 0.0
+            material_key = equation.physics == :poisson ? :kappa : :mu
+            for axis in 1:d
+                xp = spatial_shift(centre, axis, dx)
+                xm = spatial_shift(centre, axis, -dx)
+                xhp = spatial_shift(centre, axis, dx / 2)
+                xhm = spatial_shift(centre, axis, -dx / 2)
+                cp, _ = material_value_gradient(scenario, material_key, xhp[1:d], d)
+                cm, _ = material_value_gradient(scenario, material_key, xhm[1:d], d)
+                flux_divergence +=
+                    (cp * (field_at(xp)[1] - u0[1]) -
+                     cm * (u0[1] - field_at(xm)[1])) / dx^2
+            end
+            if equation.physics == :poisson
+                discrete[1] = flux_divergence
+            elseif equation.physics == :sh_frequency
+                rho, _ = material_value_gradient(scenario, :rho, centre[1:d], d)
+                omega = 0.8 * sqrt(BASE.mu / BASE.rho) *
+                    norm(FIELD_WAVE[1:d])
+                discrete[1] = rho * omega^2 * u0[1] + flux_divergence
+            else
+                tp = copy(centre); tp[end] += dt
+                tm = copy(centre); tm[end] -= dt
+                dtt = (field_at(tp)[1] - 2u0[1] + field_at(tm)[1]) / dt^2
+                rho, _ = material_value_gradient(scenario, :rho, centre[1:d], d)
+                discrete[1] = rho * dtt - flux_divergence
+            end
+        elseif equation.physics == :acoustic
+            tp = copy(centre); tp[end] += dt
+            tm = copy(centre); tm[end] -= dt
+            dtt = (field_at(tp)[1] - 2u0[1] + field_at(tm)[1]) / dt^2
+            lap = 0.0
+            for axis in 1:d
+                lap += (field_at(spatial_shift(centre, axis, dx))[1] -
+                    2u0[1] + field_at(spatial_shift(centre, axis, -dx))[1]) / dx^2
+            end
+            velocity, _ = material_value_gradient(
+                scenario, :velocity, centre[1:d], d)
+            discrete[1] = dtt - velocity^2 * lap
+        elseif equation.physics == :elastic
+            tp = copy(centre); tp[end] += dt
+            tm = copy(centre); tm[end] -= dt
+            dtt = (field_at(tp) .- 2 .* u0 .+ field_at(tm)) ./ dt^2
+            grad = zeros(Float64, d, d) # component, derivative direction
+            lap = zeros(Float64, d)
+            for axis in 1:d
+                up = field_at(spatial_shift(centre, axis, dx))
+                um = field_at(spatial_shift(centre, axis, -dx))
+                grad[:, axis] .= (up .- um) ./ (2dx)
+                lap .+= (up .- 2 .* u0 .+ um) ./ dx^2
+            end
+            divergence_at(x) = sum(axis ->
+                (field_at(spatial_shift(x, axis, dx))[axis] -
+                 field_at(spatial_shift(x, axis, -dx))[axis]) / (2dx), 1:d)
+            divu = tr(grad)
+            graddiv = [
+                (divergence_at(spatial_shift(centre, axis, dx)) -
+                 divergence_at(spatial_shift(centre, axis, -dx))) / (2dx)
+                for axis in 1:d
+            ]
+            rho, _ = material_value_gradient(scenario, :rho, centre[1:d], d)
+            mu, _ = material_value_gradient(scenario, :mu, centre[1:d], d)
+            lambda, _ = material_value_gradient(scenario, :lambda, centre[1:d], d)
+            gradmu = zeros(Float64, d)
+            gradlambda = zeros(Float64, d)
+            for axis in 1:d
+                xp = spatial_shift(centre, axis, dx)
+                xm = spatial_shift(centre, axis, -dx)
+                mup, _ = material_value_gradient(scenario, :mu, xp[1:d], d)
+                mum, _ = material_value_gradient(scenario, :mu, xm[1:d], d)
+                lp, _ = material_value_gradient(scenario, :lambda, xp[1:d], d)
+                lm, _ = material_value_gradient(scenario, :lambda, xm[1:d], d)
+                gradmu[axis] = (mup - mum) / (2dx)
+                gradlambda[axis] = (lp - lm) / (2dx)
+            end
+            for component in 1:d
+                variable_terms = dot(gradmu, grad[component, :]) +
+                    dot(gradmu, grad[:, component]) +
+                    gradlambda[component] * divu
+                spatial = mu * lap[component] +
+                    (lambda + mu) * graddiv[component] + variable_terms
+                discrete[component] = rho * dtt[component] - spatial
+            end
+        else
+            error("Unsupported explicit-FD physics $(equation.physics)")
+        end
+
+        residual2 += sum(abs2, discrete .- f0)
+        force2 += sum(abs2, f0)
+        count += length(f0)
+    end
+    absolute = sqrt(residual2 / count)
+    relative = absolute / max(sqrt(force2 / count), eps(Float64))
+    return absolute, relative, count
 end
 
 function periodic_coordinates(index, n, dx, dt, equation)
@@ -254,6 +404,7 @@ function residual_error(numeric, equation, scenario, n, dx, dt; branch=:P)
             mu, _ = material_value_gradient(scenario, :mu, point[1:d], d)
             lambda, _ = material_value_gradient(scenario, :lambda, point[1:d], d)
             velocity, _ = material_value_gradient(scenario, :velocity, point[1:d], d)
+            kappa, _ = material_value_gradient(scenario, :kappa, point[1:d], d)
             for variable_index in axes(numeric.lhs_varm, 1)
                 symbol = numeric.lhs_varm[variable_index, local_index]
                 text = string(symbol)
@@ -261,6 +412,7 @@ function residual_error(numeric, equation, scenario, n, dx, dt; branch=:P)
                     occursin("μ", text) ? mu :
                     occursin("λ", text) ? lambda :
                     (startswith(text, "v") || occursin("v(", text)) ? velocity :
+                    occursin("κ", text) ? kappa :
                     occursin("ω", text) ?
                         0.8 * sqrt(BASE.mu / BASE.rho) * norm(FIELD_WAVE[1:d]) :
                     1.0
@@ -356,11 +508,23 @@ function max_amplification(numeric, equation; samples=13)
                 maximum(abs.(amplification_roots(
                     numeric, equation, [theta], mapping))))
         end
-    else
+    elseif equation.space_dimension == 2
         for theta_x in angles, theta_y in angles
             maximum_modulus = max(maximum_modulus,
                 maximum(abs.(amplification_roots(
                     numeric, equation, [theta_x, theta_y], mapping))))
+        end
+    else
+        # A full cubic scan is prohibitively expensive for 3-D elastic
+        # recipes.  Axis, face-diagonal and body-diagonal rays expose the
+        # relevant isotropic extrema while keeping this a screening test.
+        directions = ([1.0, 0.0, 0.0],
+                      normalize([1.0, 1.0, 0.0]),
+                      normalize([1.0, 1.0, 1.0]))
+        for theta in angles, direction in directions
+            maximum_modulus = max(maximum_modulus,
+                maximum(abs.(amplification_roots(
+                    numeric, equation, theta .* direction, mapping))))
         end
     end
     return maximum_modulus
@@ -416,16 +580,19 @@ function dispersion_rows_for(equation, scheme, cfl; quick=false)
     ppws = quick ? [5.0, 8.0, 12.0, 20.0] :
         [4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 16.0, 24.0, 32.0]
     directions = equation.space_dimension == 1 ?
-        [(name="axis", unit=[1.0])] :
+        [(name="axis", unit=[1.0])] : equation.space_dimension == 2 ?
         [(name="axis", unit=[1.0, 0.0]),
-         (name="diagonal", unit=[inv(sqrt(2)), inv(sqrt(2))])]
-    branches = equation.physics == :elastic ? (:P, :S) : equation.branches
+         (name="diagonal", unit=[inv(sqrt(2)), inv(sqrt(2))])] :
+        [(name="axis", unit=[1.0, 0.0, 0.0]),
+         (name="face_diagonal", unit=normalize([1.0, 1.0, 0.0])),
+         (name="body_diagonal", unit=normalize([1.0, 1.0, 1.0]))]
+    branches = equation.branches
     rows = NamedTuple[]
     for direction in directions, ppw in ppws, branch in branches
         theta = 2pi / ppw
         spatial_angles = theta .* direction.unit
         roots = amplification_roots(numeric, equation, spatial_angles, mapping)
-        speed = branch == :S ? sqrt(BASE.mu / BASE.rho) :
+        speed = branch in (:S, :S1, :S2) ? sqrt(BASE.mu / BASE.rho) :
             branch == :P && equation.physics == :elastic ?
                 sqrt((BASE.lambda + 2 * BASE.mu) / BASE.rho) :
                 characteristic_speed(equation)
@@ -489,38 +656,74 @@ function run_convergence(equations, schemes; quick=false)
     rows = NamedTuple[]
     timing_rows = NamedTuple[]
     for equation in equations, scheme in schemes
-        scenarios = material_scenarios(equation)
-        branches = equation.physics == :elastic ? (:P, :S) : equation.branches
+        scenarios = filter(
+            scenario -> scenario.name in SYSTEMATIC_SCENARIOS,
+            material_scenarios(equation),
+        )
+        branches = equation.branches
         for n in selected_sizes(equation, quick)
             dx = 2pi / n
             dt = equation.has_time ? CFL_RUN * dx / characteristic_speed(equation) : nothing
-            @info "Wave periodic recipe" equation=equation.label scheme=scheme.name n dx dt
-            recipe = nothing
-            recipe_seconds = @elapsed recipe = make_recipe(equation, scheme, dx; dt)
-            numeric = compile_recipe(recipe)
-            # Time a production-like repeated local-symbol evaluation separately
-            mapping = homogeneous_mapping(numeric, equation)
-            angles = fill(0.37, equation.space_dimension + equation.has_time)
-            numeric_symbol(numeric, equation, angles, mapping) # warm-up
-            repeats = 20
-            application_seconds = @elapsed for _ in 1:repeats
+            @info "Systematic absolute-error benchmark" equation=equation.label scheme=scheme.name n dx dt
+            is_explicit = scheme.family === :explicitFD
+            numeric = nothing
+            recipe_seconds = 0.0
+            application_seconds = NaN
+            local_points = 0
+            if !is_explicit
+                recipe = nothing
+                recipe_seconds = @elapsed recipe = make_recipe(equation, scheme, dx; dt)
+                numeric = compile_recipe(recipe)
+                mapping = homogeneous_mapping(numeric, equation)
+                angles = fill(0.37, equation.space_dimension + equation.has_time)
                 numeric_symbol(numeric, equation, angles, mapping)
+                repeats = 20
+                application_seconds = @elapsed for _ in 1:repeats
+                    numeric_symbol(numeric, equation, angles, mapping)
+                end
+                application_seconds /= repeats
+                local_points = length(numeric.offsets)
             end
             push!(timing_rows, (
                 equation=equation.label, equation_id=equation.equation,
                 scheme=scheme.name, n, dx,
-                local_space_time_points=length(numeric.offsets),
+                form=String(is_explicit ? :explicit :
+                    (scheme.family === :convFD ? :strong_reference : BENCHMARK_FORM)),
+                local_space_time_points=local_points,
                 recipe_seconds,
-                symbol_application_seconds=application_seconds / repeats,
+                symbol_application_seconds=application_seconds,
             ))
-            for scenario in scenarios, branch in branches
-                elapsed = @elapsed absolute, relative, samples =
-                    residual_error(numeric, equation, scenario, n, dx, dt; branch)
+            for scenario in scenarios
+                branch_results = NamedTuple[]
+                for branch in branches
+                    absolute = relative = NaN
+                    samples = 0
+                    elapsed = @elapsed begin
+                        absolute, relative, samples = is_explicit ?
+                            explicit_residual_error(
+                                equation, scenario, n, dx, dt; branch) :
+                            residual_error(
+                                numeric, equation, scenario, n, dx, dt; branch)
+                    end
+                    push!(branch_results, (; absolute, relative, samples, elapsed))
+                end
+                combined = equation.physics == :elastic
+                absolute = combined ?
+                    sqrt(mean(result.absolute^2 for result in branch_results)) :
+                    only(branch_results).absolute
+                relative = combined ?
+                    sqrt(mean(result.relative^2 for result in branch_results)) :
+                    only(branch_results).relative
+                samples = sum(result.samples for result in branch_results)
+                elapsed = sum(result.elapsed for result in branch_results)
+                branch_label = combined ? "P-S-combined" : String(only(branches))
                 push!(rows, (
                     equation=equation.label, equation_id=equation.equation,
                     physics=String(equation.physics), scheme=scheme.name,
+                    form=String(is_explicit ? :explicit :
+                        (scheme.family === :convFD ? :strong_reference : BENCHMARK_FORM)),
                     family=String(scheme.family), scenario=scenario.name,
-                    relation=String(scenario.relation), branch=String(branch),
+                    relation=String(scenario.relation), branch=branch_label,
                     n, dx, dt=equation.has_time ? dt : NaN,
                     absolute_error=absolute, relative_error=relative,
                     samples, residual_seconds=elapsed,
@@ -540,16 +743,48 @@ function main()
     output_dir = joinpath(FLEXOPT_ROOT, "scripts", "tmp",
         "famous_equation_periodic_benchmarks")
     mkpath(output_dir)
+    form_suffix = String(BENCHMARK_FORM)
     output_file = joinpath(output_dir, quick ?
-        "wave_fd_vs_opt_quick.jld2" : "wave_fd_vs_opt.jld2")
+        "wave_fd_vs_opt_$(form_suffix)_quick.jld2" :
+        "wave_fd_vs_opt_$(form_suffix).jld2")
+    resume = get(ENV, "FLEXOPT_WAVE_RESUME", "1") == "1"
     if skip_convergence && isfile(output_file)
         previous = load(output_file)
         convergence_rows = get(previous, "convergence_rows", NamedTuple[])
         timing_rows = get(previous, "timing_rows", NamedTuple[])
     else
-        convergence_rows, timing_rows = skip_convergence ?
-            (NamedTuple[], NamedTuple[]) :
-            run_convergence(equations, schemes; quick)
+        previous = resume && isfile(output_file) ? load(output_file) : Dict()
+        convergence_rows = resume ?
+            get(previous, "convergence_rows", NamedTuple[]) : NamedTuple[]
+        timing_rows = resume ?
+            get(previous, "timing_rows", NamedTuple[]) : NamedTuple[]
+        completed_equations = Set(resume ?
+            get(previous, "completed_equations", String[]) : String[])
+        if !skip_convergence
+            for equation in equations
+                equation.equation in completed_equations && begin
+                    @info "Resuming: equation already complete" equation=equation.label
+                    continue
+                end
+                equation_rows, equation_timings =
+                    run_convergence([equation], schemes; quick)
+                append!(convergence_rows, equation_rows)
+                append!(timing_rows, equation_timings)
+                push!(completed_equations, equation.equation)
+                # An equation-level checkpoint preserves all completed PDEs if
+                # a later high-dimensional recette is interrupted.
+                jldsave(output_file;
+                    schema_version=SCHEMA_VERSION,
+                    variational_form=String(BENCHMARK_FORM),
+                    convergence_rows,
+                    timing_rows,
+                    completed_equations=sort!(collect(completed_equations)),
+                    schemes,
+                    equations,
+                )
+                @info "Saved equation checkpoint" equation=equation.label output_file
+            end
+        end
     end
 
     cfl_rows = NamedTuple[]
@@ -565,7 +800,7 @@ function main()
                     scheme=scheme.name,
                 ), item))
             end
-            branches = equation.physics == :elastic ? (:P, :S) : equation.branches
+            branches = equation.branches
             for branch in branches
                 push!(cfl_rows, (
                     equation=equation.label, equation_id=equation.equation,
@@ -579,11 +814,14 @@ function main()
 
     jldsave(output_file;
         schema_version=SCHEMA_VERSION,
+        variational_form=String(BENCHMARK_FORM),
         convergence_rows,
         timing_rows,
         cfl_rows,
         cfl_scan_rows,
         dispersion_rows,
+        completed_equations=sort!(unique(
+            row.equation_id for row in convergence_rows)),
         schemes,
         equations,
         base_material=BASE,

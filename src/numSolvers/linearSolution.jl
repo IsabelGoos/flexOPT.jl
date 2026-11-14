@@ -127,22 +127,23 @@ end
 
 """
     overlapBoundaryLinearSystem(volume, boundary, points;
-        mode=:additive, boundary_weight=1.0)
+        mode=:replace, boundary_weight=1.0)
 
-Overlap rows assembled from an independent OPT boundary recipe with the
-volume operator at `points`. The default `:additive` mode preserves the
-dynamic volume equation and adds the boundary residual, as in a weak/FEM-like
-assembly. The default preserves the native OPT coefficient scale.
+Install rows assembled from an independent OPT boundary recipe at `points`.
+The default `:replace` mode is the physically appropriate choice when the
+boundary recipe already contains the weak PDE on the truncated domain: the
+ordinary interior row must not remain active and no separate traction equation
+is added to it. The default preserves the native OPT coefficient scale.
 `boundary_weight=:match_volume` is available as a conditioning diagnostic but
-can over-penalize the boundary in a time-marching problem. `mode=:replace` is retained only for
-diagnostics; replacing a second-order dynamic equation by a first-order
-traction equation can make the current-time matrix singular.
+can over-penalize the boundary in a time-marching problem. `mode=:additive` is
+retained only for genuinely additive constraints and must be requested
+explicitly; it is not a traction-free-surface treatment.
 """
 function overlapBoundaryLinearSystem(
     volume,
     boundary,
     points;
-    mode::Symbol=:additive,
+    mode::Symbol=:replace,
     boundary_weight=1.0,
 )
     volume.spaceShape == boundary.spaceShape ||
@@ -645,7 +646,7 @@ function applyBoundaryConditionForced!(A, b; leftValue=1.0, rightValue=1.0)
     return A, b
 end
 
-function prepareConstantMatrix(preparedLin;
+function materializeConstantMatrix(preparedLin;
     boundaryConditionForced=false,
     sparse_output=true,
     leftValue=1.0,
@@ -671,17 +672,147 @@ function prepareConstantMatrix(preparedLin;
         applyBoundaryConditionForced!(A, btmp; leftValue=leftValue, rightValue=rightValue)
     end
 
-    factor = lu(A)
-    return A, factor
+    return A
+end
+
+function prepareConstantMatrix(preparedLin; kwargs...)
+    A = materializeConstantMatrix(preparedLin; kwargs...)
+    return A, lu(A)
 end
 
 """
-    propagateLinearSystem(prepared, Nt, dt; sourceFull, output_stride=1)
+    prepareLumpedFuturePredictor(A, prepared; singular_tolerance=1e-12)
+
+Lump every future-space coefficient of `A` onto the physical point belonging
+to its equation row, separately for every input/output field pair.  The
+result is one independent `NField × NField` block per point and preserves the
+action of the complete future operator on spatially constant fields.
+
+The returned object stores inverse blocks, not a global sparse factorization.
+It currently supports one, two or three fields and is intentionally CPU-first;
+the blocks have the layout needed by a future batched GPU kernel.
+"""
+function prepareLumpedFuturePredictor(
+    A::AbstractMatrix,
+    prepared;
+    singular_tolerance::Real=1e-12,
+)
+    npoints = prepared.NpointsSpace
+    nfield = prepared.NField
+    nfield in 1:3 || throw(ArgumentError(
+        "lumped future predictor currently supports 1–3 fields; got $nfield"))
+    size(A) == (npoints*nfield, npoints*nfield) ||
+        throw(DimensionMismatch("future matrix dimensions disagree with prepared system"))
+    singular_tolerance >= 0 || throw(ArgumentError(
+        "singular_tolerance must be nonnegative"))
+
+    blocks = zeros(Float64, nfield, nfield, npoints)
+    rows, columns, values = findnz(sparse(A))
+    for (row, column, value) in zip(rows, columns, values)
+        point = div(row - 1, nfield) + 1
+        equation_field = mod(row - 1, nfield) + 1
+        unknown_field = div(column - 1, npoints) + 1
+        blocks[equation_field, unknown_field, point] += value
+    end
+
+    inverse_blocks = similar(blocks)
+    determinants = Vector{Float64}(undef, npoints)
+    condition_estimates = Vector{Float64}(undef, npoints)
+    for point in 1:npoints
+        B = @view blocks[:, :, point]
+        scale = max(maximum(abs, B), eps(Float64))
+        if nfield == 1
+            determinant = B[1,1]
+            abs(determinant) > singular_tolerance*scale || throw(ArgumentError(
+                "singular lumped future block at point $point"))
+            inverse_blocks[1,1,point] = inv(determinant)
+        elseif nfield == 2
+            a, b = B[1,1], B[1,2]
+            c, d = B[2,1], B[2,2]
+            determinant = a*d - b*c
+            abs(determinant) > singular_tolerance*scale^2 || throw(ArgumentError(
+                "singular lumped future block at point $point"))
+            inverse_blocks[1,1,point] = d/determinant
+            inverse_blocks[1,2,point] = -b/determinant
+            inverse_blocks[2,1,point] = -c/determinant
+            inverse_blocks[2,2,point] = a/determinant
+        else
+            a,b,c = B[1,1],B[1,2],B[1,3]
+            d,e,f = B[2,1],B[2,2],B[2,3]
+            g,h,i = B[3,1],B[3,2],B[3,3]
+            A11, A12, A13 = e*i-f*h, c*h-b*i, b*f-c*e
+            A21, A22, A23 = f*g-d*i, a*i-c*g, c*d-a*f
+            A31, A32, A33 = d*h-e*g, b*g-a*h, a*e-b*d
+            determinant = a*A11 + b*A21 + c*A31
+            abs(determinant) > singular_tolerance*scale^3 || throw(ArgumentError(
+                "singular lumped future block at point $point"))
+            inverse_blocks[1,1,point] = A11/determinant
+            inverse_blocks[1,2,point] = A12/determinant
+            inverse_blocks[1,3,point] = A13/determinant
+            inverse_blocks[2,1,point] = A21/determinant
+            inverse_blocks[2,2,point] = A22/determinant
+            inverse_blocks[2,3,point] = A23/determinant
+            inverse_blocks[3,1,point] = A31/determinant
+            inverse_blocks[3,2,point] = A32/determinant
+            inverse_blocks[3,3,point] = A33/determinant
+        end
+        determinants[point] = determinant
+        inverse_norm = maximum(sum(abs, inverse_blocks[:,:,point]; dims=2))
+        block_norm = maximum(sum(abs, B; dims=2))
+        condition_estimates[point] = block_norm * inverse_norm
+    end
+    (; inverse_blocks, blocks, determinants, condition_estimates,
+       npoints, nfield, singular_tolerance=Float64(singular_tolerance),
+       kind=:lumped_future)
+end
+
+function applyLumpedFuturePredictor!(solution, predictor, rhs)
+    length(solution) == predictor.npoints*predictor.nfield ||
+        throw(DimensionMismatch("solution length differs from lumped predictor"))
+    length(rhs) == length(solution) ||
+        throw(DimensionMismatch("right-hand side length differs from solution"))
+    npoints, nfield = predictor.npoints, predictor.nfield
+    inverse_blocks = predictor.inverse_blocks
+    Threads.@threads for point in 1:npoints
+        for output_field in 1:nfield
+            value = 0.0
+            for equation_field in 1:nfield
+                row = equation_field + nfield*(point-1)
+                value += inverse_blocks[output_field,equation_field,point] * rhs[row]
+            end
+            column = point + npoints*(output_field-1)
+            solution[column] = value
+        end
+    end
+    solution
+end
+
+"""
+    propagateLinearSystem(prepared, Nt, dt; sourceFull, output_stride=1,
+        scheme=:direct, predictor_mode=:prepared, predictor_prepared=nothing,
+        corrector_iterations=1, corrector_tolerance=0,
+        corrector_relaxation=1)
 
 Run an already prepared OPT time-marching system in memory and return field
 snapshots with layout `(space..., field, output_time)`. `sourceFull` uses
 `(space_point, force_field, source_time)` and must include the extra time
 levels required by the OPT stencil.
+
+With `scheme=:predictor_corrector`, `predictor_mode=:prepared` uses
+`predictor_prepared` as the truncated operator `A_tr`. Alternatively,
+`predictor_mode=:lumped_future` constructs one local block per physical point
+by summing all complete-operator coefficients acting at the future time. At
+every time step it first solves
+
+`A_tr u_pred = b_tr`,
+
+then applies one or more defect-correction iterations
+
+`A_tr δu = b - A u`,  `u ← u + ω δu`.
+
+This is a stationary Richardson iteration preconditioned by `A_tr`. The full
+matrix is applied but never factorized; only the truncated matrix is
+factorized. `corrector_iterations=0` returns the predictor alone.
 """
 function propagateLinearSystem(
     prepared,
@@ -691,6 +822,14 @@ function propagateLinearSystem(
     output_stride::Integer=1,
     initialCondition=0.0,
     blowup_limit=Inf,
+    solver_name="OPT",
+    scheme::Symbol=:direct,
+    predictor_mode::Symbol=:prepared,
+    predictor_prepared=nothing,
+    predictor_singular_tolerance::Real=1e-12,
+    corrector_iterations::Integer=1,
+    corrector_tolerance::Real=0.0,
+    corrector_relaxation::Real=1.0,
 )
     Nt > 0 || throw(ArgumentError("Nt must be positive"))
     output_stride > 0 || throw(ArgumentError("output_stride must be positive"))
@@ -704,46 +843,163 @@ function propagateLinearSystem(
         throw(DimensionMismatch(
             "sourceFull needs at least $minimum_source_times time samples",
         ))
+    scheme in (:direct, :predictor_corrector) ||
+        throw(ArgumentError("scheme must be :direct or :predictor_corrector"))
+    predictor_mode in (:prepared, :lumped_future) || throw(ArgumentError(
+        "predictor_mode must be :prepared or :lumped_future"))
+    corrector_iterations >= 0 ||
+        throw(ArgumentError("corrector_iterations must be nonnegative"))
+    corrector_tolerance >= 0 ||
+        throw(ArgumentError("corrector_tolerance must be nonnegative"))
+    0 < corrector_relaxation <= 2 ||
+        throw(ArgumentError("corrector_relaxation must lie in (0, 2]"))
+
+    predictor = predictor_mode === :prepared ? predictor_prepared : nothing
+    scheme === :predictor_corrector && predictor_mode === :prepared &&
+        isnothing(predictor) && throw(ArgumentError(
+            "predictor_prepared is required for predictor_mode=:prepared"))
+    if scheme === :predictor_corrector && predictor_mode === :prepared
+        compatibility = (
+            :spaceShape, :NpointsSpace, :NField, :NforcePoints,
+            :NForceField, :timePointsUsedForOneStep,
+        )
+        for name in compatibility
+            getproperty(predictor, name) == getproperty(prepared, name) ||
+                throw(DimensionMismatch(
+                    "predictor and full systems disagree on $name"))
+        end
+        size(predictor.known_lhs_template) ==
+            size(prepared.known_lhs_template) ||
+            throw(DimensionMismatch("predictor known-field layout differs"))
+        size(predictor.known_rhs_template) ==
+            size(prepared.known_rhs_template) ||
+            throw(DimensionMismatch("predictor force layout differs"))
+    end
 
     knownField = fill(Float64(initialCondition), size(prepared.known_lhs_template))
     knownForce = fill(Float64(initialCondition), size(prepared.known_rhs_template))
     unknownField = fill(Float64(initialCondition), prepared.NpointsSpace, prepared.NField)
-    _, factor = prepareConstantMatrix(prepared; sparse_output=true)
+    fullMatrix = nothing
+    factor = nothing
+    local_predictor = nothing
+    matrix_setup_wall_time_s = @elapsed begin
+        if scheme === :direct
+            _, factor = prepareConstantMatrix(prepared; sparse_output=true)
+        else
+            fullMatrix = materializeConstantMatrix(prepared; sparse_output=true)
+            if predictor_mode === :prepared
+                _, factor = prepareConstantMatrix(predictor; sparse_output=true)
+            else
+                local_predictor = prepareLumpedFuturePredictor(
+                    fullMatrix, prepared;
+                    singular_tolerance=predictor_singular_tolerance)
+            end
+        end
+    end
     b = copy(prepared.b_template)
+    predictor_b = scheme === :predictor_corrector &&
+        predictor_mode === :prepared ?
+        copy(predictor.b_template) : nothing
+    residual = scheme === :predictor_corrector ? similar(b) : nothing
+    correction = scheme === :predictor_corrector ? similar(b) : nothing
     requested_steps = unique(vcat(0, collect(output_stride:output_stride:Nt), Nt))
     stored_lookup = Set(requested_steps)
     stored_steps = Int[0]
     snapshots = Array{Float64}[]
     times = Float64[]
     stopped_early = false
+    corrector_iterations_per_step = Int[]
+    corrector_relative_residuals = Float64[]
     push!(snapshots, reshape(copy(unknownField), prepared.spaceShape..., prepared.NField))
     push!(times, 0.0)
     nKnownTime = size(knownField, 3)
 
-    for step in 1:Nt
-        knownForce .= sourceFull[:, :, step:step+prepared.timePointsUsedForOneStep-1]
-        prepared.b_fun!(b, vcat(vec(knownField), vec(knownForce)))
-        unknownField .= reshape(factor \ b, prepared.NpointsSpace, prepared.NField)
-        amplitude = maximum(abs, unknownField)
-        if !isfinite(amplitude) || amplitude > blowup_limit
-            @warn "stopping OPT propagation" step amplitude blowup_limit
-            stopped_early = true
-            break
-        end
-        if nKnownTime > 0
-            nKnownTime > 1 &&
-                (knownField[:, :, 1:end-1] .= knownField[:, :, 2:end])
-            knownField[:, :, end] .= unknownField
-        end
-        if step in stored_lookup
-            push!(snapshots,
-                  reshape(copy(unknownField), prepared.spaceShape..., prepared.NField))
-            push!(times, step * Float64(dt))
-            push!(stored_steps, step)
+    marching_wall_time_s = @elapsed begin
+        for step in 1:Nt
+            knownForce .= sourceFull[:, :, step:step+prepared.timePointsUsedForOneStep-1]
+            knownInputs = vcat(vec(knownField), vec(knownForce))
+            prepared.b_fun!(b, knownInputs)
+            if scheme === :direct
+                unknownField .= reshape(factor \ b,
+                    prepared.NpointsSpace, prepared.NField)
+            else
+                unknownVector = vec(unknownField)
+                if predictor_mode === :prepared
+                    predictor.b_fun!(predictor_b, knownInputs)
+                    unknownVector .= factor \ predictor_b
+                else
+                    # A_tr is obtained from the complete future matrix only;
+                    # past fields and Γ source therefore remain exactly in b.
+                    applyLumpedFuturePredictor!(unknownVector, local_predictor, b)
+                end
+                iterations_used = 0
+                relative_residual = Inf
+                for iteration in 1:corrector_iterations
+                    mul!(residual, fullMatrix, unknownVector)
+                    residual .= b .- residual
+                    relative_residual = norm(residual) / max(norm(b), eps(Float64))
+                    if relative_residual <= corrector_tolerance
+                        break
+                    end
+                    if predictor_mode === :prepared
+                        ldiv!(correction, factor, residual)
+                    else
+                        applyLumpedFuturePredictor!(correction,
+                            local_predictor, residual)
+                    end
+                    unknownVector .+= corrector_relaxation .* correction
+                    iterations_used = iteration
+                end
+                # Report the residual of the field actually accepted.
+                mul!(residual, fullMatrix, unknownVector)
+                residual .= b .- residual
+                relative_residual = norm(residual) / max(norm(b), eps(Float64))
+                push!(corrector_iterations_per_step, iterations_used)
+                push!(corrector_relative_residuals, relative_residual)
+            end
+            amplitude = maximum(abs, unknownField)
+            if !isfinite(amplitude) || amplitude > blowup_limit
+                @warn "stopping propagation" solver_name step amplitude blowup_limit
+                stopped_early = true
+                break
+            end
+            if nKnownTime > 0
+                nKnownTime > 1 &&
+                    (knownField[:, :, 1:end-1] .= knownField[:, :, 2:end])
+                knownField[:, :, end] .= unknownField
+            end
+            if step in stored_lookup
+                push!(snapshots,
+                      reshape(copy(unknownField), prepared.spaceShape..., prepared.NField))
+                push!(times, step * Float64(dt))
+                push!(stored_steps, step)
+            end
         end
     end
-    history = cat(snapshots...; dims=length(prepared.spaceShape) + 2)
-    (; history, times, stored_steps, dt=Float64(dt), stopped_early)
+    history = nothing
+    history_assembly_wall_time_s = @elapsed begin
+        history = cat(snapshots...; dims=length(prepared.spaceShape) + 2)
+    end
+    predictor_corrector = scheme === :predictor_corrector ? (
+        predictor_mode,
+        iterations_per_step=corrector_iterations_per_step,
+        relative_residuals=corrector_relative_residuals,
+        requested_iterations=corrector_iterations,
+        tolerance=Float64(corrector_tolerance),
+        relaxation=Float64(corrector_relaxation),
+        local_block_determinant_extrema=
+            predictor_mode === :lumped_future ?
+                extrema(local_predictor.determinants) : nothing,
+        local_block_condition_extrema=
+            predictor_mode === :lumped_future ?
+                extrema(local_predictor.condition_estimates) : nothing,
+    ) : nothing
+    timing = (; matrix_setup_wall_time_s, marching_wall_time_s,
+        history_assembly_wall_time_s,
+        total_wall_time_s=matrix_setup_wall_time_s + marching_wall_time_s +
+            history_assembly_wall_time_s)
+    (; history, times, stored_steps, dt=Float64(dt), stopped_early,
+       scheme, predictor_corrector, timing)
 end
 
 function timeMarchingSchemeLinear(

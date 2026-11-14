@@ -31,6 +31,27 @@ function _normalise_recipe_backend(backend_spec)
     end
 end
 
+"""
+Resolve `recipe_backend = :auto` once the equation is known.
+
+Recipe coefficients are computed in Float32 on a GPU backend (see
+`coefficientFloat` below), which leaves a ~1e-7 relative inexactness in every
+stencil; it shows up as an accuracy floor ~1e-7/(kh)^2 on fine grids.  So
+`:auto` means the CPU (Float64) for equations with up to 3 coordinates, where a
+recipe takes seconds, and keeps the current (GPU) backend only for 4
+coordinates (3D + t), where the recipe is expensive -- with a warning.  An
+explicit backend (:cpu, :metal, :cuda, ...) is honoured unchanged.
+"""
+function _resolve_auto_recipe_backend(backend_spec, ncoordinates::Integer)
+    is_auto = backend_spec === nothing || backend_spec === :auto || backend_spec == "auto"
+    is_auto && ncoordinates <= 3 && return CPU()
+    selected = _normalise_recipe_backend(backend_spec)
+    if is_auto && !(selected isa KernelAbstractions.CPU)
+        @warn "recipe_backend=:auto with $(ncoordinates) coordinates: recipe built on $(nameof(typeof(selected))) in Float32 (pass recipe_backend=:cpu for Float64 coefficients)" maxlog=1
+    end
+    return selected
+end
+
 function _recipe_backend_name(recipe_backend)
     recipe_backend isa KernelAbstractions.CPU && return :cpu
     return Symbol(lowercase(string(nameof(typeof(recipe_backend)))))
@@ -90,13 +111,54 @@ function _construct_test_blocks(
     return operators, results[1][2], results[1][3], levels, offsets
 end
 
+function _normalise_variational_form(form)
+    symbol = Symbol(lowercase(String(form)))
+    symbol === :weak && return :natural_weak
+    symbol === :strong && return :weighted_residual
+    symbol in (:natural_weak, :weighted_residual) && return symbol
+    throw(ArgumentError(
+        "variationalForm must be :weak, :strong, :natural_weak, or " *
+        ":weighted_residual",
+    ))
+end
+
+_public_variational_form(form::Symbol) =
+    form === :natural_weak ? :weak : :strong
+
 function makeOPTsemiSymbolic(params::Dict)
     @unpack famousEquationType, Δ, orderBtime, orderBspace, pointsInSpace, pointsInTime, supplementaryOrder, fieldItpl, materItpl = params
-    recipe_backend = _normalise_recipe_backend(_opt_paramget(params, :recipe_backend, _opt_paramget(params, :coefficient_backend, :auto)))
+    # resolved below, once the number of coordinates of the equation is known
+    recipe_backend_spec = _opt_paramget(params, :recipe_backend, _opt_paramget(params, :coefficient_backend, :auto))
     nuGeometryMode = Symbol(_opt_paramget(params, :nuGeometryMode, :middle))
-    taylorInverseMode = Symbol(_opt_paramget(params, :taylorInverseMode, :scaled_svd))
+    nuCentre = _opt_paramget(params, :nuCentre, nothing)
+    exactTaylorTotalDegree = _opt_paramget(
+        params, :exactTaylorTotalDegree, nothing,
+    )
+    taylorInverseMode = Symbol(_opt_paramget(
+        params, :taylorInverseMode,
+        _opt_paramget(params, :taylor_inverse_mode, :hierarchical_constrained),
+    ))
     trialFunctionRefPoints = _opt_paramget(params, :trialFunctionRefPoints, nothing)
+    testIntegrationBounds = _opt_paramget(params, :testIntegrationBounds, nothing)
     hierarchicalTestFunctions = Bool(_opt_paramget(params, :hierarchicalTestFunctions, false))
+    testDerivativeOrders = _opt_paramget(params, :testDerivativeOrders, nothing)
+    variationalForm = _normalise_variational_form(
+        _opt_paramget(params, :variationalForm, DEFAULT_FORM[]),
+    )
+    form = _public_variational_form(variationalForm)
+    if variationalForm === :natural_weak &&
+       (orderBspace == -1 || orderBtime == -1)
+        throw(ArgumentError(
+            "orderBspace/orderBtime = -1 is available only with " *
+            "form=:strong (set_default_form!(:strong) or " *
+            "variationalForm=:strong). YorderBspace/YorderBtime = -1 " *
+            "remains valid because Y is not the differentiated test function.",
+        ))
+    end
+    variationalForm === :natural_weak && !isnothing(testDerivativeOrders) &&
+        throw(ArgumentError(
+            "testDerivativeOrders is inferred term by term in :natural_weak mode",
+        ))
     evenOrderHalfShiftMode =
         Symbol(_opt_paramget(params, :evenOrderHalfShiftMode, :none))
     evenOrderHalfShiftMode in (:none, :w_only, :all) ||
@@ -107,25 +169,99 @@ function makeOPTsemiSymbolic(params::Dict)
     # construction of NamedTuples
     trialFunctionsCharacteristics=(orderBtime=orderBtime,orderBspace=orderBspace,
         pointsInSpace=pointsInSpace,pointsInTime=pointsInTime,
-        nuGeometryMode=nuGeometryMode)
+        nuGeometryMode=nuGeometryMode, nuCentre=nuCentre,
+        exactTaylorTotalDegree=exactTaylorTotalDegree)
 
     # here we can compute the different interpolated Taylor expansion options
     TaylorOptionsμ=TaylorOptions(fieldItpl,supplementaryOrder)
     TaylorOptionsμᶜ=TaylorOptions(materItpl,supplementaryOrder)
 
     equationCharacteristics,equationCharacteristicsForce=famousEquations(famousEquationType)
+    recipe_backend = _resolve_auto_recipe_backend(
+        recipe_backend_spec, length(equationCharacteristics.coordinates),
+    )
     fields=equationCharacteristics.fields
     extfields=equationCharacteristicsForce.fields
 
-    # compact coefficients for l.h.s. of the equation
-    equationCharacteristics=equationCharacteristics
-    numbersOfTheSystemL=numbersOfTheExpression(equationCharacteristics,trialFunctionsCharacteristics,TaylorOptionsμ,TaylorOptionsμᶜ)
-    numbersOfTheSystem = numbersOfTheSystemL
-    _,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ=investigateDependencies(equationCharacteristics,numbersOfTheSystem,trialFunctionsCharacteristics,TaylorOptionsμ,TaylorOptionsμᶜ)
-    bigα,varM,CartesianDependencies=bigαFinder(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ)
+    # Compact coefficients for the l.h.s.  In natural-weak mode, preserve the
+    # public strong equation and split only its explicit outer spatial
+    # divergences into groups carrying different derivatives of W.
+    equationCharacteristicsStrong = equationCharacteristics
+    weakForm = variationalForm === :natural_weak ?
+        naturalWeakForm(equationCharacteristicsStrong) : nothing
+    groupedExpressions = if variationalForm === :natural_weak
+        weakTermGroups(weakForm)
+    else
+        orders = isnothing(testDerivativeOrders) ?
+            ntuple(_ -> 0, length(equationCharacteristicsStrong.coordinates)) :
+            Tuple(Int.(collect(testDerivativeOrders)))
+        Dict(orders => collect(equationCharacteristicsStrong.exprs isa Tuple ?
+            equationCharacteristicsStrong.exprs :
+            (equationCharacteristicsStrong.exprs,)))
+    end
+    derivativeGroups = sort!(collect(keys(groupedExpressions)); by=identity)
 
-    Ajiννᶜ,Ulocal,Cˡη,testFunctionOrders,testFunctionOffsets=_construct_test_blocks(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM; hierarchical=hierarchicalTestFunctions, even_order_half_shift_mode=evenOrderHalfShiftMode, recipe_backend=recipe_backend, taylor_inverse_mode=taylorInverseMode, trial_function_ref_points=trialFunctionRefPoints)
+    lhsResults = map(derivativeGroups) do derivativeOrders
+        all(>=(0), derivativeOrders) ||
+            throw(ArgumentError("test derivative orders must be non-negative"))
+        groupedCharacteristics = merge(equationCharacteristicsStrong, (
+            exprs=Tuple(groupedExpressions[derivativeOrders]),
+        ))
+        numbers = numbersOfTheExpression(
+            groupedCharacteristics, trialFunctionsCharacteristics,
+            TaylorOptionsμ, TaylorOptionsμᶜ,
+        )
+        _, ordersμ, configsμ, ordersμc, configsμc = investigateDependencies(
+            groupedCharacteristics, numbers, trialFunctionsCharacteristics,
+            TaylorOptionsμ, TaylorOptionsμᶜ,
+        )
+        α, materialVariables, dependencies = bigαFinder(
+            groupedCharacteristics, numbers, ordersμ,
+        )
+        matrix, localFields, taylorCoefficients, testOrders, testOffsets =
+            _construct_test_blocks(
+                groupedCharacteristics, numbers,
+                ordersμ, configsμ, ordersμc, configsμc,
+                Δnum, α, materialVariables;
+                hierarchical=hierarchicalTestFunctions,
+                even_order_half_shift_mode=evenOrderHalfShiftMode,
+                recipe_backend=recipe_backend,
+                taylor_inverse_mode=taylorInverseMode,
+                trial_function_ref_points=trialFunctionRefPoints,
+                test_integration_bounds=testIntegrationBounds,
+                test_derivative_orders=collect(derivativeOrders),
+            )
+        return (
+            matrix=matrix, localFields=localFields,
+            taylorCoefficients=taylorCoefficients,
+            testOrders=testOrders, testOffsets=testOffsets,
+            numbers=numbers, materialVariables=materialVariables,
+            dependencies=dependencies, configs=configsμ,
+        )
+    end
+    isempty(lhsResults) && error("the weak form produced no volume term")
+    referenceLHS = first(lhsResults)
+    all(result -> result.testOrders == referenceLHS.testOrders,
+        lhsResults) || error("weak-term test orders differ")
+    all(result -> result.testOffsets == referenceLHS.testOffsets,
+        lhsResults) || error("weak-term test offsets differ")
+    all(result -> size(result.matrix) == size(referenceLHS.matrix),
+        lhsResults) || error("weak-term recipe matrices differ in size")
+
+    Ajiννᶜ = copy(referenceLHS.matrix)
+    for result in Iterators.drop(lhsResults, 1)
+        Ajiννᶜ .+= result.matrix
+    end
+    Ulocal = referenceLHS.localFields
+    Cˡη = referenceLHS.taylorCoefficients
+    testFunctionOrders = referenceLHS.testOrders
+    testFunctionOffsets = referenceLHS.testOffsets
+    numbersOfTheSystemL = referenceLHS.numbers
+    varM = referenceLHS.materialVariables
+    CartesianDependencies = referenceLHS.dependencies
+    configsTaylorμ = referenceLHS.configs
     lhs=(Ajiννᶜ=Ajiννᶜ,Ulocal=Ulocal,varM=varM,CartesianDependencies=CartesianDependencies)
+    lhsTestDerivativeOrders = derivativeGroups
 
     # compact coefficients for r.h.s. of the equation
     equationCharacteristics=equationCharacteristicsForce
@@ -133,7 +269,7 @@ function makeOPTsemiSymbolic(params::Dict)
     numbersOfTheSystem = numbersOfTheSystemR
     _,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ=investigateDependencies(equationCharacteristics,numbersOfTheSystem,trialFunctionsCharacteristics,TaylorOptionsμ,TaylorOptionsμᶜ)
     bigα,varM,CartesianDependencies=bigαFinder(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ)
-    Γjiννᶜ,Flocal,CˡηForce,testFunctionOrdersForce,testFunctionOffsetsForce =_construct_test_blocks(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM; hierarchical=hierarchicalTestFunctions, even_order_half_shift_mode=evenOrderHalfShiftMode, recipe_backend=recipe_backend, taylor_inverse_mode=taylorInverseMode, trial_function_ref_points=trialFunctionRefPoints)
+    Γjiννᶜ,Flocal,CˡηForce,testFunctionOrdersForce,testFunctionOffsetsForce =_construct_test_blocks(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM; hierarchical=hierarchicalTestFunctions, even_order_half_shift_mode=evenOrderHalfShiftMode, recipe_backend=recipe_backend, taylor_inverse_mode=taylorInverseMode, trial_function_ref_points=trialFunctionRefPoints, test_integration_bounds=testIntegrationBounds, test_derivative_orders=zeros(Int, length(equationCharacteristics.coordinates)))
     testFunctionOrders == testFunctionOrdersForce ||
         error("left and right hierarchical test orders differ")
     testFunctionOffsets == testFunctionOffsetsForce ||
@@ -146,17 +282,33 @@ function makeOPTsemiSymbolic(params::Dict)
     nConfigurations=size(nodes)[1]
     numbersOfTheSystem=(numbersOfTheSystemL=numbersOfTheSystemL,numbersOfTheSystemR=numbersOfTheSystemR,nConfigurations=nConfigurations)
     fieldNames=(fields=fields, extfields=extfields)
-    recette=(lhs=lhs,rhs=rhs,nodes=nodes,centresIndices=centresIndices,numbersOfTheSystem=numbersOfTheSystem,fieldNames=fieldNames,Cˡη=Cˡη,CˡηForce=CˡηForce, testFunctionOrders=testFunctionOrders, testFunctionOffsets=testFunctionOffsets, hierarchicalTestFunctions=hierarchicalTestFunctions, evenOrderHalfShiftMode=evenOrderHalfShiftMode, recipe_backend=_recipe_backend_name(recipe_backend), recipe_backend_type=string(typeof(recipe_backend)))
+    recette=(lhs=lhs,rhs=rhs,nodes=nodes,centresIndices=centresIndices,numbersOfTheSystem=numbersOfTheSystem,fieldNames=fieldNames,Cˡη=Cˡη,CˡηForce=CˡηForce, testFunctionOrders=testFunctionOrders, testFunctionOffsets=testFunctionOffsets, testDerivativeOrders=lhsTestDerivativeOrders, form=form, variationalForm=variationalForm, weakForm=weakForm, hierarchicalTestFunctions=hierarchicalTestFunctions, evenOrderHalfShiftMode=evenOrderHalfShiftMode, taylorInverseMode=taylorInverseMode, recipe_backend=_recipe_backend_name(recipe_backend), recipe_backend_type=string(typeof(recipe_backend)))
     return @strdict(recette)
 
 end
 
+# Cache key of a recipe: record the backend actually used when it is the CPU
+# (see _resolve_auto_recipe_backend), so that recipes built on a GPU in
+# Float32 under the same parameters are never reloaded as if they were Float64.
+# GPU-resolved recipes keep their historical key, so the existing (expensive)
+# 4D caches remain valid.
+function commonBatchs.cacheKeyExtras(::typeof(makeOPTsemiSymbolic), params)
+    spec = _opt_paramget(params, :recipe_backend,
+        _opt_paramget(params, :coefficient_backend, :auto))
+    equation = _opt_paramget(params, :famousEquationType, nothing)
+    isnothing(equation) && return nothing
+    characteristics, _ = famousEquations(equation)
+    selected = _resolve_auto_recipe_backend(spec, length(characteristics.coordinates))
+    selected isa KernelAbstractions.CPU || return nothing
+    return Dict{String,Any}("recipe_backend_resolved" => "cpu")
+end
 
-function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend, taylor_inverse_mode=:scaled_svd)
+
+function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend, taylor_inverse_mode=:hierarchical_constrained)
     return constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμ,configsTaylorμ,Δnum,bigα,varM;ImakeReport=ImakeReport, recipe_backend=recipe_backend, taylor_inverse_mode=taylor_inverse_mode)
 end
 
-function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend, taylor_inverse_mode=:scaled_svd, trial_function_ref_points=nothing, test_nu_offset=0.0, interpolation_offset=0.0)
+function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend, taylor_inverse_mode=:hierarchical_constrained, trial_function_ref_points=nothing, test_integration_bounds=nothing, test_nu_offset=0.0, interpolation_offset=0.0, test_derivative_orders=nothing)
     numberGeometries = configsTaylorμ.numberGeometries
     numberGeometries == configsTaylorμᶜ.numberGeometries ||
         throw(ArgumentError("field and material Taylor grids must expose the same ν geometries"))
@@ -183,8 +335,10 @@ function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSp
             ImakeReport=ImakeReport, recipe_backend=recipe_backend,
             taylor_inverse_mode=taylor_inverse_mode,
             trial_function_ref_points=trial_function_ref_points,
+            test_integration_bounds=test_integration_bounds,
             test_nu_offset=test_nu_offset,
             interpolation_offset=interpolation_offset,
+            test_derivative_orders=test_derivative_orders,
         )
     end
 
@@ -192,7 +346,7 @@ function constructAmatrix(equationCharacteristics,numbersOfTheSystem,ordersForSp
     return Ajiννᶜ, results[1][2], results[1][3]
 end
 
-function _constructAmatrix_single(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend, taylor_inverse_mode=:scaled_svd, trial_function_ref_points=nothing, test_nu_offset=0.0, interpolation_offset=0.0)
+function _constructAmatrix_single(equationCharacteristics,numbersOfTheSystem,ordersForSplinesμ,configsTaylorμ,ordersForSplinesμᶜ,configsTaylorμᶜ,Δnum,bigα,varM;ImakeReport=true, recipe_backend=backend, taylor_inverse_mode=:hierarchical_constrained, trial_function_ref_points=nothing, test_integration_bounds=nothing, test_nu_offset=0.0, interpolation_offset=0.0, test_derivative_orders=nothing)
     
     # for the future develpments: ν can move but it's already more or less coded! look at pointν and nGeometry
 
@@ -202,6 +356,7 @@ function _constructAmatrix_single(equationCharacteristics,numbersOfTheSystem,ord
     @unpack fields,vars = equationCharacteristics
     @unpack nCoordinates,NtypeofExpr,NtypeofExpr,NtypeofFields = numbersOfTheSystem
     @unpack multiOrdersIndices,availablePointsConfigurations,centrePointConfigurations,availableμPoints,availableμaxes, numberGeometries = configsTaylorμ
+    exactTaylorTotalDegree = configsTaylorμ.exactTaylorTotalDegree
     availableμᶜPoints = configsTaylorμᶜ.availableμPoints
     availableμᶜaxes = configsTaylorμᶜ.availableμaxes
     
@@ -213,6 +368,12 @@ function _constructAmatrix_single(equationCharacteristics,numbersOfTheSystem,ord
 
     nGeometry = 1
     iConfigGeometry = 1
+    testDerivativeOrders = isnothing(test_derivative_orders) ?
+        zeros(Int, nCoordinates) : Int.(collect(test_derivative_orders))
+    length(testDerivativeOrders) == nCoordinates ||
+        throw(DimensionMismatch(
+            "test_derivative_orders must contain one order per coordinate",
+        ))
 
     @show pointsIndices=availablePointsConfigurations[iConfigGeometry] # CartesianIndices
     @show middleLinearν=centrePointConfigurations[iConfigGeometry] # scalar
@@ -250,19 +411,29 @@ function _constructAmatrix_single(equationCharacteristics,numbersOfTheSystem,ord
     # look at the debug1DKernelIntegral.ipynb    
     
     coefWYYKK = Array{Any,1}(undef,nCoordinates) # Array of (l_n_max+1,lᶜ_nᶜ_max+1,length(μs),length(μᶜs),length(ν) ) times nCoordinates
+    axis_option(option, iCoord) = begin
+        isnothing(option) && return nothing
+        if option isa Tuple && length(option) == nCoordinates &&
+           all(value -> value isa Tuple || value isa AbstractVector, option)
+            return option[iCoord]
+        end
+        return option
+    end
     for iCoord ∈ 1:nCoordinates
         maxNodes = pointsIndices[end][iCoord]
         nodesFromOne = [1,2,3] # ∈ Z like [1,2,3], an array of integers collect(1:1:Npoints) (nothing else!!)
         ν = pointν[iCoord]
         lᶜ_nᶜ_max = L_MINUS_N[end][iCoord] # variable
         l_n_max = L_MINUS_N[end][iCoord] # field
-        νRefPoints = trial_function_ref_points === nothing ?
+        referencePointsHere = axis_option(trial_function_ref_points, iCoord)
+        νRefPoints = referencePointsHere === nothing ?
             collect(1:maxNodes) :
-            trial_function_ref_points
+            collect(referencePointsHere)
+        integrationBounds = axis_option(test_integration_bounds, iCoord)
         # WνOffset is deliberately applied inside WYYKK only to the test
         # family Wν.  The Yμ/Yμᶜ interpolation families and Kμ/Kμᶜ Taylor
         # kernels remain on their original field/material μ grids.
-        params = (orderBspline1D=orderBspline[iCoord], YorderBspline1Dμᶜ=YorderBsplineμᶜ[iCoord], YorderBspline1Dμ=YorderBsplineμ[iCoord], μᶜs=μᶜaxes[iCoord], μs=μaxes[iCoord], maxNode = pointsIndices[end][iCoord], ν=ν, νRefPoints=νRefPoints, WνOffset=test_nu_offset, lᶜ_nᶜ_max=lᶜ_nᶜ_max, l_n_max=l_n_max,  Δ=Δnum[iCoord],ImakeReport=ImakeReport)
+        params = (orderBspline1D=orderBspline[iCoord], YorderBspline1Dμᶜ=YorderBsplineμᶜ[iCoord], YorderBspline1Dμ=YorderBsplineμ[iCoord], μᶜs=μᶜaxes[iCoord], μs=μaxes[iCoord], maxNode = pointsIndices[end][iCoord], ν=ν, νRefPoints=νRefPoints, WνOffset=test_nu_offset, WDerivativeOrder=testDerivativeOrders[iCoord], integrationBounds=integrationBounds, lᶜ_nᶜ_max=lᶜ_nᶜ_max, l_n_max=l_n_max,  Δ=Δnum[iCoord],ImakeReport=ImakeReport)
         coefWYYKK[iCoord] = WYYKKIntegralNumerical(params) 
     end
 
@@ -273,14 +444,16 @@ function _constructAmatrix_single(equationCharacteristics,numbersOfTheSystem,ord
     @show typeof(μPoints), μPoints[1], typeof(pointsIndices)
 
     coefInversionDict = Dict{String,Any}(@strdict multiOrdersIndices pointsIndices μpointsIndices=μPoints Δ=Δnum)
-    coefInversionDict["pinv_version"] = string(taylor_inverse_mode)
+    coefInversionDict["pinv_version"] = "$(taylor_inverse_mode)_hierarchical_v1"
     coefInversionDict["taylor_inverse_mode"] = taylor_inverse_mode
+    coefInversionDict["exact_taylor_total_degree"] = exactTaylorTotalDegree
     output=myProduceOrLoad(TaylorCoefInversion,coefInversionDict,"taylorCoefInv")
     Cˡη=output["CˡηGlobal"]
 
     coefInversionDict = Dict{String,Any}(@strdict multiOrdersIndices pointsIndices μpointsIndices=μᶜPoints Δ=Δnum)
-    coefInversionDict["pinv_version"] = string(taylor_inverse_mode)
+    coefInversionDict["pinv_version"] = "$(taylor_inverse_mode)_hierarchical_v1"
     coefInversionDict["taylor_inverse_mode"] = taylor_inverse_mode
+    coefInversionDict["exact_taylor_total_degree"] = exactTaylorTotalDegree
     output=myProduceOrLoad(TaylorCoefInversion,coefInversionDict,"taylorCoefInv")
     Cˡηᶜ=output["CˡηGlobal"]
 
@@ -347,13 +520,15 @@ function _constructAmatrix_single(equationCharacteristics,numbersOfTheSystem,ord
     #region make a dictionary for μ ∈ μPoints and its linearised version
 
     tableForμPoints = Array{Int32,2}(undef,nCoordinates,length(μPoints))
+    linearμPoints = LinearIndices(μPoints)
     for iμ ∈ CartesianIndices(μPoints), iCoord ∈ 1:nCoordinates
-            tableForμPoints[iCoord,iμ]=iμ[iCoord]
+        tableForμPoints[iCoord, linearμPoints[iμ]] = iμ[iCoord]
     end
 
     tableForμᶜPoints = Array{Int32,2}(undef,nCoordinates,length(μᶜPoints))
+    linearμᶜPoints = LinearIndices(μᶜPoints)
     for iμᶜ ∈ CartesianIndices(μᶜPoints), iCoord ∈ 1:nCoordinates        
-        tableForμᶜPoints[iCoord,iμᶜ]=iμᶜ[iCoord]
+        tableForμᶜPoints[iCoord, linearμᶜPoints[iμᶜ]] = iμᶜ[iCoord]
     end
     
 

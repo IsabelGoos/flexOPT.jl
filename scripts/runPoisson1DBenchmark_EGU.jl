@@ -243,6 +243,9 @@ function make_recipe(config, dx)
         "materItpl" => config.materItpl,
         "nuGeometryMode" => config.nuGeometryMode,
         "recipe_backend" => RECIPE_BACKEND,
+        # A box-car test function (orderBspace = -1, the FD references) is
+        # only allowed in the strong form; OPT recipes keep the package default.
+        "variationalForm" => config.orderBspace == -1 ? :strong : DEFAULT_FORM[],
     )
     return makeOPTsemiSymbolic(params)
 end

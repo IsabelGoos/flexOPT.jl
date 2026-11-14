@@ -25,6 +25,11 @@ julia>  famousEquations("1Dacceleration")
 
 function famousEquations(name::AbstractString) 
     exprs,fields,vars,extexprs,extfields,extvars,coordinates,∂,∂²=famousEquation(Val(Symbol("eq_"*name)))
+    # `(x)` is just `x` in Julia, whereas `(x,)` is a one-element tuple.
+    # Several historical 1-D gallery entries use the former spelling.  Keep
+    # their public definitions working, but present one uniform coordinate
+    # container to the operator-construction code.
+    coordinates = coordinates isa Tuple ? coordinates : (coordinates,)
     equationCharacteristics=(exprs=exprs, fields=fields, vars=vars, coordinates=coordinates, ∂=∂, ∂²=∂²)
     equationCharacteristicsForce=(exprs=extexprs, fields=extfields, vars=extvars, coordinates=coordinates, ∂=∂, ∂²=∂²)
 
@@ -325,12 +330,53 @@ function famousEquation(::Val{:eq_2DsismoTimeIsoHeteroSingleForce})
     return exprs, fields, vars, extexprs, extfields, extvars, coordinates, ∂, ∂²
 end
 
+"""
+Explicit component form of the heterogeneous 2-D isotropic elastic equation.
+
+This is mathematically identical to `eq_2DsismoTimeIsoHeteroSingleForce`, but
+deliberately avoids the fourth-order elasticity tensor and `@tullio`.  It is
+useful for auditing the semi-symbolic OPT recipe because every λ and μ term is
+visible before `bigαFinder` constructs equation (54)'s material/field coupling.
+The coordinate named `y` is the notebook's vertical `z` coordinate.
+"""
+function famousEquation(::Val{:eq_2DsismoTimeIsoHeteroSingleForceExplicit})
+    @variables ρ(x,y) λ(x,y) μ(x,y)
+    @variables u(x,y,t)[1:2] f(x,y,t)[1:2]
+
+    ux, uz = u[1], u[2]
+
+    # ∇·σ in plane strain, written without implicit tensor contraction:
+    # σxx = (λ+2μ)∂x ux + λ∂y uz
+    # σxy = μ(∂y ux + ∂x uz)
+    # σyy = λ∂x ux + (λ+2μ)∂y uz
+    traction_x =
+        ∂x((λ + 2μ) * ∂x(ux) + λ * ∂y(uz)) +
+        ∂y(μ * (∂y(ux) + ∂x(uz)))
+    traction_z =
+        ∂x(μ * (∂y(ux) + ∂x(uz))) +
+        ∂y(λ * ∂x(ux) + (λ + 2μ) * ∂y(uz))
+
+    exprs = (
+        ρ * ∂t²(ux) - traction_x,
+        ρ * ∂t²(uz) - traction_z,
+    )
+    fields = (ux, uz)
+    vars = (ρ, λ, μ)
+    extexprs = (f[1], f[2])
+    extfields = (f[1], f[2])
+    extvars = (f[1], f[2])
+    coordinates = (x, y, t)
+    ∂, ∂² = usefulPartials(coordinates)
+    return exprs, fields, vars, extexprs, extfields, extvars,
+        coordinates, ∂, ∂²
+end
+
 function famousEquation(::Val{:eq_2DacousticTime})
     # 2D wave equation with double couple source
     @variables v(x,y)  u(x,y,t) f(x,y,t)
     
     exprs =  ∂t²(u)- v^2 *(∂x²(u) + ∂y²(u))
-    fields=u
+    fields= u
     vars = v
 
     extexprs = f
@@ -385,6 +431,68 @@ function famousEquation(::Val{:eq_3DsismoTimeIso})
     coordinates =(x,y,z,t)
     ∂, ∂² = usefulPartials(coordinates)
     return exprs, fields, vars, extexprs, extfields, extvars, coordinates, ∂, ∂²
+end
+
+function famousEquation(::Val{:eq_3DsismoTimeIsoHeteroForce})
+    # Body-force form used by periodic manufactured-solution benchmarks.  The
+    # production moment-tensor form above remains unchanged.
+    @variables ρ(x,y,z) (C(x,y,z))[1:3,1:3,1:3,1:3]
+    @variables u(x,y,z,t)[1:3] F(x,y,z,t)[1:3]
+    @variables λ(x,y,z) μ(x,y,z)
+    δ = Matrix(I, 3, 3)
+    @tullio C[i,j,k,l] := λ * δ[i,j]*δ[k,l] +
+        μ*(δ[i,k]*δ[j,l] + δ[i,l]*δ[j,k])
+    @tullio traction[i] := ∇₃[j](C[i,j,k,l] * ∇₃[l](u[k]))
+
+    exprs = ntuple(i -> ρ * ∂t²(u[i]) - traction[i], 3)
+    fields = ntuple(i -> u[i], 3)
+    vars = (ρ, λ, μ)
+    extexprs = ntuple(i -> F[i], 3)
+    extfields = extexprs
+    extvars = extexprs
+    coordinates = (x, y, z, t)
+    ∂, ∂² = usefulPartials(coordinates)
+    return exprs, fields, vars, extexprs, extfields, extvars,
+        coordinates, ∂, ∂²
+end
+
+
+function famousEquation(::Val{:eq_2Dgoundwater})
+    @variables hₚ(x,z,t) hₚᵏ(x,z) f(x,z,t)
+    @variables cₛ Λ c₁ γ
+
+    λh = ifelse(
+        hₚᵏ <= 0,
+        0,
+        ifelse(hₚᵏ < 1 / c₁, (c₁ * hₚᵏ)^γ, 1),
+    )
+
+    # ∇hₚ + e_z = (∂x(hₚ), ∂z(hₚ) + 1)
+    flux_x = λh * Λ * ∂x(hₚ)
+    flux_z = λh * Λ * (∂z(hₚ) + 1)
+
+    exprs = cₛ * ∂t(hₚ) - (
+        ∂x(flux_x) +
+        ∂z(flux_z)
+    )
+
+    fields = hₚ
+    # hₚᵏ is the spatial state from the preceding Picard iteration.  The
+    # numerical operator freezes λ(hₚᵏ), while hₚ remains the solved field.
+    vars = (cₛ, Λ, c₁, γ, hₚᵏ)
+
+    # Keep a space-time forcing field for the OPT recipe.
+    # Give it a zero-valued numerical array for the source-free case.
+    extexprs = f
+    extfields = f
+    extvars = f
+
+    coordinates = (x, z, t)
+    ∂, ∂² = usefulPartials(coordinates)
+
+    return exprs, fields, vars,
+           extexprs, extfields, extvars,
+           coordinates, ∂, ∂²
 end
 
 function famousEquation(::Val{:eq_highSchoolProblem})

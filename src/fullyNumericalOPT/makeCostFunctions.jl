@@ -28,6 +28,12 @@ struct SparseNumericalOperator{T,S}
     geometry
 end
 
+# Size of either operator representation (the sparse one stores it only in
+# its matrix).  Used by _residual_numerical_operator so that
+# representation=:auto/:sparse works as well as :matrixfree.
+_operator_size(op::MatrixFreeNumericalOperator) = op.size
+_operator_size(op::SparseNumericalOperator) = size(op.matrix)
+
 function applyNumericalOperator!(y, op::MatrixFreeNumericalOperator, x)
     fill!(y, zero(eltype(y)))
     rows = op.table.rows
@@ -62,16 +68,18 @@ function applyNumericalOperator!(y, op::SparseNumericalOperator, x)
 end
 
 function _residual_numerical_operator(left, right)
-    left.size[1] == right.size[1] ||
+    lsize = _operator_size(left)
+    rsize = _operator_size(right)
+    lsize[1] == rsize[1] ||
         throw(DimensionMismatch("left and right numerical operators must have the same number of rows"))
     T = promote_type(eltype(left.table.vals), eltype(right.table.vals))
     rows = vcat(left.table.rows, right.table.rows)
-    cols = vcat(left.table.cols, Int32.(right.table.cols .+ left.size[2]))
+    cols = vcat(left.table.cols, Int32.(right.table.cols .+ lsize[2]))
     vals = vcat(T.(left.table.vals), .-T.(right.table.vals))
     table = CouplingTable(rows, cols, vals)
     return MatrixFreeNumericalOperator(
         table,
-        (left.size[1], left.size[2] + right.size[2]),
+        (lsize[1], lsize[2] + rsize[2]),
         "$(left.side)-$(right.side)",
         left.backend,
         :matrixfree,
@@ -302,7 +310,7 @@ function numericalOperatorConstruction(optRec,modelFam,side;absorbingBoundaries=
     )
 
     @unpack νWhole, νGeometry, νRelative, localPointsIndices,
-        ModelPoints, Models, maskingField, conv,
+        ModelPoints, Models, maskingField, testFunctionMask, conv,
         timePointsUsedForOneStep, activeTimePoints, wholeMin, wholeMax,
         modelMin, modelDomainMax, wholeRegionPointsSpace = numericalGeometry
 
@@ -339,6 +347,7 @@ function numericalOperatorConstruction(optRec,modelFam,side;absorbingBoundaries=
 
     for iTestFunctions in eachindex(νWhole)
         νtmpWhole = νWhole[iTestFunctions]
+        testFunctionMask[νtmpWhole] || continue
         iGeometry = νGeometry[iTestFunctions]
         localPointsHere = localPointsIndices[iGeometry]
         middlepointHere = νRelative[iTestFunctions]
@@ -845,7 +854,8 @@ function prepareNumericalOperatorGeometry(
         modelPoints = (modelPoints..., 1)
 
         lhs_CartesianDependencies = vcat(lhs.CartesianDependencies,zeros(Int, 1, NtypeofMaterialVariables),)
-        rhs_CartesianDependencies = vcat(rhs.CartesianDependencies,zeros(Int, 1, NtypeofFields),)
+        # one column per RHS coefficient variable (extvars), not per force field
+        rhs_CartesianDependencies = vcat(rhs.CartesianDependencies,zeros(Int, 1, size(rhs.CartesianDependencies, 2)),)
 
         for iGeometry in 1:nGeometry
             localPointsIndices[iGeometry] = [SVector{newD,Int}(p..., 1) for p in nodes[iGeometry]]
@@ -1031,20 +1041,22 @@ function prepareNumericalOperatorGeometry(
 
     #region making a maskingField (for limited source areas, boundary conditions, etc.)
 
-    maskingField=Array{Any,newD-1}(undef,Tuple(wholeRegionPointsSpace)) # maskingField is defined only for whole domain
+    maskingField=Array{Any,newD-1}(undef,Tuple(wholeRegionPointsSpace)) # field-column mask
+    testFunctionMask = trues(Tuple(wholeRegionPointsSpace)) # residual-row mask
     champsLimité = nothing
+    maskingField .= 1.0
     if maskedRegionInSpace === nothing
-        maskingField .= 1.0
+        # Every test function and every field column is active.
     elseif maskedRegionInSpace isa AbstractVector{<:CartesianIndex}
         # A spatial mask is also used to assemble boundary-only operators.
         # It must not imply a restricted source field: the symbolic RHS fields
         # are constructed later, outside this geometry routine.  In particular,
         # there is no `場` binding here to copy from.  Keep `champsLimité`
         # unset and let the mask select the operator rows only.
-        maskingField .= 0.0
+        testFunctionMask .= false
         for iSpace in maskedRegionInSpace
             jSpace = conv.model2whole(iSpace)
-            maskingField[jSpace] = 1.0
+            testFunctionMask[jSpace] = true
         end
     else
         throw(ArgumentError(
@@ -1075,6 +1087,7 @@ function prepareNumericalOperatorGeometry(
     ModelPoints=ModelPoints,
     geometryPreference=geometryPreference,
     maskingField=maskingField,
+    testFunctionMask=testFunctionMask,
     conv=conv,
     Models = Models,
     timePointsUsedForOneStep = timePointsUsedForOneStep,
