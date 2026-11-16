@@ -380,25 +380,6 @@ const MODEL_2_RANGETYPE = Dict{Symbol, NTuple{2, NTuple{2, Float64}}}(
 
 
 
-A
-function _normalized_configuration_dict(raw::AbstractDict)
-    normalized = Dict{Symbol,Any}()
-    for (raw_key, value) in raw
-        key = Symbol(raw_key)
-        key in _NUFLUX_CONFIGURATION_KEYS ||
-            throw(ArgumentError(
-                "unknown neutrino-flux parameter $(repr(raw_key)); " *
-                "supported keys are $(sort!(collect(_NUFLUX_CONFIGURATION_KEYS)))",
-            ))
-        haskey(normalized, key) &&
-            throw(ArgumentError(
-                "parameter $key was provided more than once using String/Symbol keys",
-            ))
-        normalized[key] = value
-    end
-    return normalized
-end
-
 
 
 
