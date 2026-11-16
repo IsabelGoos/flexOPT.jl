@@ -323,7 +323,28 @@ _normalize_choice(::Any, v::AbstractDict) =
 # Everything else is left as it is.
 _normalize_choice(::Any, v) = v
 
+# ============================================================================
+# Base urls of the different neutrino flux models
+# ============================================================================
 
+const HONDA_BASE_URL = "http://www-rccn.icrr.u-tokyo.ac.jp/mhonda/public/nflx2014"
+const CHENG_BASE_URL = "https://raw.githubusercontent.com/JIECheng2021/atm_nu_flux_data/main"
+         
+# ============================================================================
+# Valid energy and angular ranges of each model's tables
+# ============================================================================
+
+const HONDA_E_RANGE    = (0.1, 1.0e4)
+const HONDA_COSθ_RANGE = (-1.0, 1.0)
+
+const CHENG_E_RANGE    = (0.01, 1.0e4)
+const CHENG_COSθ_RANGE = (-1.0, 1.0)
+
+# Associate to each model the corresponding energy and angular ranges.
+const MODEL_2_RANGETYPE = Dict{Symbol, NTuple{2, NTuple{2, Float64}}}(
+    :Honda      => (HONDA_E_RANGE, HONDA_COSθ_RANGE),
+    :Cheng      => (CHENG_E_RANGE, CHENG_COSθ_RANGE),
+)
 
 
 
@@ -345,7 +366,7 @@ _parameters_namedtuple(params::NeutrinoFluxParameters) = (;
 
 
 
-
+A
 function _normalized_configuration_dict(raw::AbstractDict)
     normalized = Dict{Symbol,Any}()
     for (raw_key, value) in raw
