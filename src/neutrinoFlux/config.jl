@@ -50,7 +50,12 @@ Base.@kwdef struct ChengParameters <: NeutrinoFluxParameters
     return_uncertainties::Bool = false
 end
 
-
+# Associate to each model the corresponding parameter set subtype.
+const MODEL_2_PARAMSTYPE = Dict{Symbol, Type{<:NeutrinoFluxParameters}}(
+    :Honda      => HondaParameters,
+    :Daemonflux => DaemonfluxParameters,
+    :Cheng      => ChengParameters,
+)
 
 
 
