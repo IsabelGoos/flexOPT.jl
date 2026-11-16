@@ -326,8 +326,6 @@ _parameters_namedtuple(params::NeutrinoFluxParameters) = (;
 
 
 
-const _NUFLUX_PARAMETER_KEYS = Set(fieldnames(NeutrinoFluxParameters))
-const _NUFLUX_CONFIGURATION_KEYS = union(_NUFLUX_PARAMETER_KEYS, Set((:model,)))
 
 function _normalize_choice(value, choices, key::Symbol)
     candidate = lowercase(String(Symbol(value)))
