@@ -215,7 +215,7 @@ const FLUX_KEYS      = ("NuMu_flux",     "Nue_flux",     "AntiNuMu_flux",     "A
 const FLUX_ERRS_KEYS = ("NuMu_flux_err", "Nue_flux_err", "AntiNuMu_flux_err", "AntiNue_flux_err")
 
 # ============================================================================
-# Validation methods
+# Validation and normalization methods
 # ============================================================================
 
 function _validate_neutrino_flux_model(model::Symbol)
@@ -301,7 +301,27 @@ function _validate_parameters(p::ChengParameters)
     return p
 end
 
+"""
+    _normalize_choice(T, value)
 
+Convert a user-supplied `value` to the type `T` expected by a parameter field,
+so that strings can be used in place of symbols, booleans, or dictionary keys.
+"""
+function _normalize_choice end
+
+# Symbol fields: accept String or Symbol.
+_normalize_choice(::Type{Symbol}, v::Union{AbstractString, Symbol}) =
+    Symbol(lowercase(String(v)))
+
+# Bool fields: accept "true" / "false" and similar, or Symbol.
+_normalize_choice(::Type{Bool}, v::Union{AbstractString, Symbol}) = parse(Bool, lowercase(String(v)))
+
+# Dictionary values (e.g. params_df): make the keys Strings.
+_normalize_choice(::Any, v::AbstractDict) =
+    Dict{String, Any}(string(k) => x for (k, x) in v)
+
+# Everything else is left as it is.
+_normalize_choice(::Any, v) = v
 
 
 
@@ -325,34 +345,6 @@ _parameters_namedtuple(params::NeutrinoFluxParameters) = (;
 
 
 
-
-
-function _normalize_choice(value, choices, key::Symbol)
-    candidate = lowercase(String(Symbol(value)))
-    match = findfirst(choice -> lowercase(String(choice)) == candidate, choices)
-    isnothing(match) &&
-        throw(ArgumentError(
-            "invalid $key=$(repr(value)); supported values are $(collect(choices))",
-        ))
-    return choices[match]
-end
-
-function _normalize_boolean(value, key::Symbol)
-    value isa Bool && return value
-    if value isa AbstractString || value isa Symbol
-        normalized = lowercase(String(value))
-        normalized == "true" && return true
-        normalized == "false" && return false
-    end
-    throw(ArgumentError("$key must be true or false; got $(repr(value))"))
-end
-
-function _normalize_daemonflux_parameters(value)
-    isnothing(value) && return nothing
-    value isa AbstractDict ||
-        throw(ArgumentError("params_df must be nothing or a dictionary"))
-    return Dict{String,Any}(string(key) => item for (key, item) in value)
-end
 
 function _normalized_configuration_dict(raw::AbstractDict)
     normalized = Dict{Symbol,Any}()
