@@ -127,57 +127,77 @@ function _update_parameters(params::ParamsType; kwargs...) where {ParamsType<:Ne
     return ParamsType(; merge(current_params, normalized_kwargs)...)
 end
 
+# ============================================================================
+# Mappings
+# ============================================================================
+# These mappings are used to build the file names that are then used to
+# retrieve the corresponding models from the web.
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-const LOCATION_MAPPING = Dict{Symbol,String}(
-    :kamioka => "kam",
+# Honda location mapping
+const LOCATION_MAPPING_H = Dict{Symbol, String}(
+    :kamioka    => "kam",
     :gran_sasso => "grn",
-    :sudbury => "sno",
-    :frejus => "frj",
-    :ino => "ino",
+    :sudbury    => "sno",
+    :frejus     => "frj",
+    :ino        => "ino",
     :south_pole => "spl",
     :pythasalmi => "pyh",
-    :homestake => "hms",
-    :juno => "juno",
+    :homestake  => "hms",
+    :juno       => "juno",
 )
 
-const SEASON_MAPPING = Dict{Symbol,String}(
-    :all_year => "ally",
+# Cheng Location mapping
+const LOCATION_MAPPING_C = Dict{Symbol, Vector{String}}(
+    :cjpl       => ["CJPL", "jp"],
+    :dune       => ["DUNE", "dune"],
+    :icecube    => ["IceCube", "icecube"],
+    :juno       => ["JUNO", "juno"],
+    :orca       => ["KM3NeT-ORCA", "orca"],
+    :superk     => ["SK", "kam"],
+    :trident    => ["TRIDENT", "trident"],
+)
+
+# Seasons, used by Honda and Cheng.
+const SEASON_MAPPING = Dict{Symbol, String}(
+    :all_year  => "ally",
     :march_may => "0305",
-    :june_aug => "0608",
-    :sept_nov => "0911",
-    :dec_feb => "1202",
+    :june_aug  => "0608",
+    :sept_nov  => "0911",
+    :dec_feb   => "1202",
 )
 
-const ANGLES_MAPPING = Dict{Symbol,String}(
-    :variable_ϕ => "20-12",
-    :averaged_ϕ => "20-01",
+# Angles separation, used by Honda and Cheng.
+const ANGLES_MAPPING = Dict{Symbol, String}(
+    :variable_ϕ  => "20-12",
+    :averaged_ϕ  => "20-01",
     :averaged_ϕθ => "01-01",
 )
 
-const MOUNTAIN_MAPPING = Dict{Symbol,String}(
-    :with => "-mtn",
+# The first/second option is used by Honda/Cheng.
+const SOLAR_MAPPING = Dict{Symbol, @NamedTuple{honda::String, cheng::String}}(
+    :minimum => (honda = "solmin", cheng = "solar-min"),
+    :maximum => (honda = "solmax", cheng = "solar-max"),
+)
+
+# Mountain overburden, used by Honda only.
+const MOUNTAIN_MAPPING = Dict{Symbol, String}(
+    :with    => "-mtn",
     :without => "",
 )
 
-const SOLAR_MAPPING = Dict{Symbol,String}(
-    :minimum => "solmin",
-    :maximum => "solmax",
+# Muon propagation, used by Cheng only.
+const MUON_PROPA_MAPPING = Dict{Symbol, String}(
+    :with    => "with-muon-in-earth",
+    :without => "without-muon-in-earth",
 )
+
+
+
+
+
+
+
+
 
 function _validate_neutrino_flux_model(model::Symbol)
     model in (:Honda, :Daemonflux) ||
