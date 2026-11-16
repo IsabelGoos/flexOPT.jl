@@ -191,6 +191,28 @@ const MUON_PROPA_MAPPING = Dict{Symbol, String}(
     :without => "without-muon-in-earth",
 )
 
+# ============================================================================
+# Allowed parameters
+# ============================================================================
+
+const ALLOWED_MODELS = Set{Symbol}([
+    :Honda, :Daemonflux, :Cheng,
+])
+
+const DAEMONFLUX_ALLOWED_FLUX_MODES = Set{Symbol}([
+    :total, :conventional,
+])
+
+const DAEMONFLUX_ALLOWED_KEYS = Set{String}([
+    "K+_158G", "K+_2P", "K+_31G", "K-_158G", "K-_2P", "K-_31G",
+    "n_158G", "n_2P", "p_158G", "p_2P",
+    "pi+_158G", "pi+_20T", "pi+_2P", "pi+_31G",
+    "pi-_158G", "pi-_20T", "pi-_2P", "pi-_31G",
+    "GSF_1", "GSF_2", "GSF_3", "GSF_4", "GSF_5", "GSF_6",
+])
+
+const FLUX_KEYS      = ("NuMu_flux",     "Nue_flux",     "AntiNuMu_flux",     "AntiNue_flux")
+const FLUX_ERRS_KEYS = ("NuMu_flux_err", "Nue_flux_err", "AntiNuMu_flux_err", "AntiNue_flux_err")
 
 
 
