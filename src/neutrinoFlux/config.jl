@@ -214,38 +214,102 @@ const DAEMONFLUX_ALLOWED_KEYS = Set{String}([
 const FLUX_KEYS      = ("NuMu_flux",     "Nue_flux",     "AntiNuMu_flux",     "AntiNue_flux")
 const FLUX_ERRS_KEYS = ("NuMu_flux_err", "Nue_flux_err", "AntiNuMu_flux_err", "AntiNue_flux_err")
 
-
-
-
-
-
-
+# ============================================================================
+# Validation methods
+# ============================================================================
 
 function _validate_neutrino_flux_model(model::Symbol)
-    model in (:Honda, :Daemonflux) ||
-        throw(ArgumentError("model must be :Honda or :Daemonflux; got $model"))
+    model in ALLOWED_MODELS ||
+        throw(ArgumentError(
+            "Unsupported neutrino flux model $(repr(model)). " *
+            "Valid: $(collect(ALLOWED_MODELS))."
+        ))
     return model
 end
 
-function _validate_neutrino_flux_parameters(params::NeutrinoFluxParameters)
-    params.flux_mode in (:total, :conventional) ||
-        throw(ArgumentError("flux_mode must be :total or :conventional"))
-    haskey(LOCATION_MAPPING, params.location_hf) ||
-        throw(ArgumentError("unsupported Honda location: $(params.location_hf)"))
-    haskey(SEASON_MAPPING, params.season_hf) ||
-        throw(ArgumentError("unsupported Honda season: $(params.season_hf)"))
-    haskey(ANGLES_MAPPING, params.angles_separation_hf) ||
+function _validate_parameters(p::HondaParameters)
+    haskey(LOCATION_MAPPING_H, p.location) ||
         throw(ArgumentError(
-            "unsupported Honda angular separation: $(params.angles_separation_hf)",
+            "Unsupported Honda location $(repr(p.location)). " *
+            "Valid: $(collect(keys(LOCATION_MAPPING_H)))."
         ))
-    haskey(MOUNTAIN_MAPPING, params.mountain_overburden_hf) ||
+    haskey(SEASON_MAPPING, p.season) ||
         throw(ArgumentError(
-            "mountain_overburden_hf must be :with or :without",
+            "Unsupported Honda season $(repr(p.season)). " *
+            "Valid: $(collect(keys(SEASON_MAPPING)))."
         ))
-    haskey(SOLAR_MAPPING, params.solar_activity_hf) ||
-        throw(ArgumentError("solar_activity_hf must be :minimum or :maximum"))
-    return params
+    haskey(ANGLES_MAPPING, p.angles_separation) ||
+        throw(ArgumentError(
+            "Unsupported Honda angular separation $(repr(p.angles_separation)). " * 
+            "Valid: $(collect(keys(ANGLES_MAPPING)))."
+        ))
+    haskey(SOLAR_MAPPING, p.solar_activity) ||
+        throw(ArgumentError(
+            "Unsupported Honda solar activity $(repr(p.solar_activity)). " *
+            "Valid: $(collect(keys(SOLAR_MAPPING)))."
+        ))
+    haskey(MOUNTAIN_MAPPING, p.mountain_overburden) ||
+        throw(ArgumentError(
+            "Unsupported Honda mountain overburden $(repr(p.mountain_overburden)). " *
+            "Valid: $(collect(keys(MOUNTAIN_MAPPING)))."
+        ))
+    return p
 end
+
+function _validate_parameters(p::DaemonfluxParameters)
+    p.flux_mode in DAEMONFLUX_ALLOWED_FLUX_MODES ||
+        throw(ArgumentError(
+            "Unsupported Daemonflux mode $(repr(p.flux_mode)). " *
+            "Valid: $(collect(DAEMONFLUX_ALLOWED_FLUX_MODES))."
+        ))
+    if !isnothing(p.params_df)
+       bad_keys = [k for k in keys(p.params_df) if k ∉ DAEMONFLUX_ALLOWED_KEYS]
+       isempty(bad_keys) || throw(ArgumentError(
+            "Invalid Daemonflux parameter(s): $(repr.(bad_keys)). " *
+            "Valid: $(collect(DAEMONFLUX_ALLOWED_KEYS))."
+        ))
+    end
+    return p
+end
+
+function _validate_parameters(p::ChengParameters)
+    haskey(LOCATION_MAPPING_C, p.location) ||
+        throw(ArgumentError(
+            "Unsupported Cheng location $(repr(p.location)). " *
+            "Valid: $(collect(keys(LOCATION_MAPPING_C)))."
+        ))
+    haskey(SEASON_MAPPING, p.season) ||
+        throw(ArgumentError(
+            "Unsupported Cheng season $(repr(p.season)). " *
+            "Valid: $(collect(keys(SEASON_MAPPING)))."
+        ))
+    haskey(ANGLES_MAPPING, p.angles_separation) ||
+        throw(ArgumentError(
+            "Unsupported Cheng angular separation $(repr(p.angles_separation)). " * 
+            "Valid: $(collect(keys(ANGLES_MAPPING)))."
+        ))
+    haskey(SOLAR_MAPPING, p.solar_activity) ||
+        throw(ArgumentError(
+            "Unsupported Cheng solar activity $(repr(p.solar_activity)). " *
+            "Valid: $(collect(keys(SOLAR_MAPPING)))."
+        ))
+    haskey(MUON_PROPA_MAPPING, p.muon_propa_earth) ||
+        throw(ArgumentError(
+            "Unsupported Cheng muon propagation $(repr(p.mountain_overburden)). " * 
+            "Valid: $(collect(keys(MUON_PROPA_MAPPING)))."
+        ))
+    return p
+end
+
+
+
+
+
+
+
+
+
+
 
 _parameters_namedtuple(params::NeutrinoFluxParameters) = (;
     flux_mode=params.flux_mode,
@@ -258,15 +322,7 @@ _parameters_namedtuple(params::NeutrinoFluxParameters) = (;
     solar_activity_hf=params.solar_activity_hf,
 )
 
-function configure_neutrino_flux(
-    params::NeutrinoFluxParameters=DEFAULT_NUFLUX_PARAMS[];
-    kwargs...,
-)
-    updated = NeutrinoFluxParameters(;
-        merge(_parameters_namedtuple(params), NamedTuple(kwargs))...,
-    )
-    return _validate_neutrino_flux_parameters(updated)
-end
+
 
 
 
