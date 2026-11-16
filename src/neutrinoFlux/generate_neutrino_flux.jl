@@ -1,20 +1,3 @@
-
-
-# Positional compatibility without the former ten-element return value.
-function read_neutrino_flux_table(
-    path::AbstractString,
-    nEbins::Integer,
-    nθbins::Integer,
-    has_header::Bool,
-)
-    return read_neutrino_flux_table(
-        path;
-        nEbins=nEbins,
-        nθbins=nθbins,
-        has_header=has_header,
-    )
-end
-
 """
     interpolate_flux_at_bin_centers(energies::Vector{Float64}, flux::Matrix{Float64}, energies_in_log::Bool)
 
