@@ -376,16 +376,6 @@ const MODEL_2_RANGETYPE = Dict{Symbol, NTuple{2, NTuple{2, Float64}}}(
 
 
 
-_parameters_namedtuple(params::NeutrinoFluxParameters) = (;
-    flux_mode=params.flux_mode,
-    return_uncertainties=params.return_uncertainties,
-    params_df=params.params_df,
-    location_hf=params.location_hf,
-    season_hf=params.season_hf,
-    angles_separation_hf=params.angles_separation_hf,
-    mountain_overburden_hf=params.mountain_overburden_hf,
-    solar_activity_hf=params.solar_activity_hf,
-)
 
 
 
@@ -409,48 +399,8 @@ function _normalized_configuration_dict(raw::AbstractDict)
     return normalized
 end
 
-function _parameters_from_dict(
-    raw::AbstractDict,
-    base::NeutrinoFluxParameters=DEFAULT_NUFLUX_PARAMS[],
-)
-    updates = _normalized_configuration_dict(raw)
-    current = Dict{Symbol,Any}(pairs(_parameters_namedtuple(base)))
 
-    if haskey(updates, :flux_mode)
-        current[:flux_mode] = _normalize_choice(
-            updates[:flux_mode],
-            (:total, :conventional),
-            :flux_mode,
-        )
-    end
-    if haskey(updates, :return_uncertainties)
-        current[:return_uncertainties] = _normalize_boolean(
-            updates[:return_uncertainties],
-            :return_uncertainties,
-        )
-    end
-    if haskey(updates, :params_df)
-        current[:params_df] = _normalize_daemonflux_parameters(updates[:params_df])
-    end
 
-    choice_fields = (
-        location_hf=Tuple(keys(LOCATION_MAPPING)),
-        season_hf=Tuple(keys(SEASON_MAPPING)),
-        angles_separation_hf=Tuple(keys(ANGLES_MAPPING)),
-        mountain_overburden_hf=Tuple(keys(MOUNTAIN_MAPPING)),
-        solar_activity_hf=Tuple(keys(SOLAR_MAPPING)),
-    )
-    for (key, choices) in pairs(choice_fields)
-        if haskey(updates, key)
-            current[key] = _normalize_choice(updates[key], choices, key)
-        end
-    end
-
-    params = NeutrinoFluxParameters(;
-        (key => current[key] for key in fieldnames(NeutrinoFluxParameters))...,
-    )
-    return _validate_neutrino_flux_parameters(params)
-end
 
 
 
