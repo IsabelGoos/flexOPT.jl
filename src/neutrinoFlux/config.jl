@@ -295,22 +295,6 @@ end
 
 
 
-# Examples
-
-    # set_default_neutrino_flux!(Dict(:model => :Honda))
-
-    # set_default_neutrino_flux!(Dict(
-    #     "location_hf" => "juno",
-    #     "solar_activity_hf" => "maximum",
-    # ))
-
-    # set_default_neutrino_flux!(Dict(
-    #     :model => :Daemonflux,
-    #     :flux_mode => :conventional,
-    #     :return_uncertainties => true,
-    #     :params_df => Dict("K+_158G" => 1.0),
-    # ))
-
 
 function _parameters_dict(
     params::NeutrinoFluxParameters;
