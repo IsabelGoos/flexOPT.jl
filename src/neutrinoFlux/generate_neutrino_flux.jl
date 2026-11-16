@@ -1,15 +1,4 @@
-function _resolve_neutrino_flux_csv(path::AbstractString)
-    candidates = String[path]
-    endswith(lowercase(path), ".csv") || push!(candidates, path * ".csv")
-    data_dir = normpath(joinpath(@__DIR__, "..", "..", "dataInput", "neutrinoFluxData"))
-    append!(candidates, joinpath.(Ref(data_dir), basename.(copy(candidates))))
-    match = findfirst(isfile, candidates)
-    isnothing(match) &&
-        throw(ArgumentError(
-            "neutrino-flux CSV not found; tried $(join(candidates, ", "))",
-        ))
-    return abspath(candidates[match])
-end
+
 
 # Positional compatibility without the former ten-element return value.
 function read_neutrino_flux_table(
