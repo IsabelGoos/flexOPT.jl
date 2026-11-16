@@ -100,6 +100,9 @@ function set_default_neutrino_flux!(model::Symbol=:Honda; kwargs...)
     return (; model=DEFAULT_NUFLUX_MODEL[], params=DEFAULT_NUFLUX_PARAMS[])
 end
 
+set_default_neutrino_flux!(model::AbstractString; kwargs...) =
+    set_default_neutrino_flux!(Symbol(model); kwargs...)
+
 """
     _update_parameters(params::NeutrinoFluxParameters; kwargs...)
 
