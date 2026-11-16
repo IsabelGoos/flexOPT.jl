@@ -57,6 +57,48 @@ const MODEL_2_PARAMSTYPE = Dict{Symbol, Type{<:NeutrinoFluxParameters}}(
     :Cheng      => ChengParameters,
 )
 
+# ============================================================================
+# Defaults
+# ============================================================================
+
+const DEFAULT_NUFLUX_MODEL  = Ref{Symbol}(:Honda)
+const DEFAULT_NUFLUX_PARAMS = Ref{NeutrinoFluxParameters}(HondaParameters())
+
+"""
+    set_default_neutrino_flux!(model::Symbol; kwargs...)
+
+Set the default neutrino flux model and its parameters (default=Honda),
+analogous to `set_default_planet!`.
+
+The parameter set is built from the defaults of `model`, and the keyword
+arguments override the fields you want to change. Fields not given as keywords
+take the model's default values, they do **not** keep settings from earlier
+calls. Optional keywords update the typed default parameters.
+
+No network access or flux computation occurs here.
+
+# Returns
+A `NamedTuple` `(; model, params)` with the new default model and its
+validated parameter set.
+"""
+function set_default_neutrino_flux!(model::Symbol=:Honda; kwargs...)
+
+    # Check if model is legit.
+    model_validated = _validate_neutrino_flux_model(model)
+
+    # Define default parameters corresponding to the model.
+    params_type = MODEL_2_PARAMSTYPE[model_validated] 
+    params = params_type()
+
+    # Update any parameters and validate the new parameter set.
+    params_updated   = _update_parameters(params; kwargs...)
+    params_validated = _validate_parameters(params_updated)
+
+    # Commit only after validation succeeded.
+    DEFAULT_NUFLUX_MODEL[]  = model_validated
+    DEFAULT_NUFLUX_PARAMS[] = params_validated
+    return (; model=DEFAULT_NUFLUX_MODEL[], params=DEFAULT_NUFLUX_PARAMS[])
+end
 
 
 
@@ -74,20 +116,6 @@ const MODEL_2_PARAMSTYPE = Dict{Symbol, Type{<:NeutrinoFluxParameters}}(
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-const DEFAULT_NUFLUX_MODEL = Ref(:Honda)
-const DEFAULT_NUFLUX_PARAMS = Ref(NeutrinoFluxParameters())
 
 const LOCATION_MAPPING = Dict{Symbol,String}(
     :kamioka => "kam",
@@ -172,42 +200,7 @@ function configure_neutrino_flux(
     return _validate_neutrino_flux_parameters(updated)
 end
 
-"""
-    set_default_neutrino_flux!(model::Symbol; kwargs...)
 
-Select the default atmospheric-flux backend, analogous to
-`set_default_planet!`. Optional keywords update the typed default parameters.
-No network access or flux computation occurs here.
-"""
-function set_default_neutrino_flux!(model::Symbol; kwargs...)
-    validated_model = _validate_neutrino_flux_model(model)
-    updated_params = isempty(kwargs) ?
-                     DEFAULT_NUFLUX_PARAMS[] :
-                     configure_neutrino_flux(; kwargs...)
-    # Commit both values only after every validation has succeeded.
-    DEFAULT_NUFLUX_MODEL[] = validated_model
-    DEFAULT_NUFLUX_PARAMS[] = updated_params
-    return (;
-        model=DEFAULT_NUFLUX_MODEL[],
-        params=DEFAULT_NUFLUX_PARAMS[],
-    )
-end
-
-"""
-    set_default_neutrino_flux!(params::NeutrinoFluxParameters; model)
-
-Replace the typed default parameter set, optionally changing the model.
-"""
-function set_default_neutrino_flux!(
-    params::NeutrinoFluxParameters;
-    model::Symbol=DEFAULT_NUFLUX_MODEL[],
-)
-    validated_model = _validate_neutrino_flux_model(model)
-    validated_params = _validate_neutrino_flux_parameters(params)
-    DEFAULT_NUFLUX_MODEL[] = validated_model
-    DEFAULT_NUFLUX_PARAMS[] = validated_params
-    return (; model=DEFAULT_NUFLUX_MODEL[], params=DEFAULT_NUFLUX_PARAMS[])
-end
 
 const _NUFLUX_PARAMETER_KEYS = Set(fieldnames(NeutrinoFluxParameters))
 const _NUFLUX_CONFIGURATION_KEYS = union(_NUFLUX_PARAMETER_KEYS, Set((:model,)))
@@ -300,43 +293,24 @@ function _parameters_from_dict(
     return _validate_neutrino_flux_parameters(params)
 end
 
-"""
-    set_default_neutrino_flux!(updates::AbstractDict)
 
-Partially update the current default model and/or any flux parameters. Keys may
-be `String` or `Symbol`; symbolic choices may likewise be strings or symbols.
-Unspecified values are preserved.
 
 # Examples
 
-    set_default_neutrino_flux!(Dict(:model => :Honda))
+    # set_default_neutrino_flux!(Dict(:model => :Honda))
 
-    set_default_neutrino_flux!(Dict(
-        "location_hf" => "juno",
-        "solar_activity_hf" => "maximum",
-    ))
+    # set_default_neutrino_flux!(Dict(
+    #     "location_hf" => "juno",
+    #     "solar_activity_hf" => "maximum",
+    # ))
 
-    set_default_neutrino_flux!(Dict(
-        :model => :Daemonflux,
-        :flux_mode => :conventional,
-        :return_uncertainties => true,
-        :params_df => Dict("K+_158G" => 1.0),
-    ))
-"""
-function set_default_neutrino_flux!(raw::AbstractDict)
-    updates = _normalized_configuration_dict(raw)
-    model = haskey(updates, :model) ?
-            _normalize_choice(
-                updates[:model],
-                (:Honda, :Daemonflux),
-                :model,
-            ) :
-            DEFAULT_NUFLUX_MODEL[]
-    return set_default_neutrino_flux!(
-        _parameters_from_dict(raw, DEFAULT_NUFLUX_PARAMS[]);
-        model=model,
-    )
-end
+    # set_default_neutrino_flux!(Dict(
+    #     :model => :Daemonflux,
+    #     :flux_mode => :conventional,
+    #     :return_uncertainties => true,
+    #     :params_df => Dict("K+_158G" => 1.0),
+    # ))
+
 
 function _parameters_dict(
     params::NeutrinoFluxParameters;
