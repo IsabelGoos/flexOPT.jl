@@ -58,100 +58,6 @@ const MODEL_2_PARAMSTYPE = Dict{Symbol, Type{<:NeutrinoFluxParameters}}(
 )
 
 # ============================================================================
-# Defaults
-# ============================================================================
-
-const DEFAULT_NUFLUX_MODEL  = Ref{Symbol}(:Honda)
-const DEFAULT_NUFLUX_PARAMS = Ref{NeutrinoFluxParameters}(HondaParameters())
-
-"""
-    set_default_neutrino_flux!(model::Symbol; kwargs...)
-
-Set the default neutrino flux model and its parameters (default=Honda),
-analogous to `set_default_planet!`.
-
-The parameter set is built from the defaults of `model`, and the keyword
-arguments override the fields you want to change. Fields not given as keywords
-take the model's default values, they do **not** keep settings from earlier
-calls. Optional keywords update the typed default parameters.
-
-No network access or flux computation occurs here.
-
-# Returns
-A `NamedTuple` `(; model, params)` with the new default model and its
-validated parameter set.
-"""
-function set_default_neutrino_flux!(model::Symbol=:Honda; kwargs...)
-
-    # Check if model is legit.
-    model_validated = _validate_neutrino_flux_model(model)
-
-    # Define default parameters corresponding to the model.
-    params_type = MODEL_2_PARAMSTYPE[model_validated] 
-    params      = params_type()
-
-    # Update any parameters and validate the new parameter set.
-    params_updated   = _update_parameters(params; kwargs...)
-    params_validated = _validate_parameters(params_updated)
-
-    # Commit only after validation succeeded.
-    DEFAULT_NUFLUX_MODEL[]  = model_validated
-    DEFAULT_NUFLUX_PARAMS[] = params_validated
-    return (; model=DEFAULT_NUFLUX_MODEL[], params=DEFAULT_NUFLUX_PARAMS[])
-end
-
-set_default_neutrino_flux!(model::AbstractString; kwargs...) =
-    set_default_neutrino_flux!(Symbol(model); kwargs...)
-
-"""
-    _update_parameters(params::NeutrinoFluxParameters; kwargs...)
-
-Return a copy of the parameter set `params` in which (only) the fields given as
-keyword arguments are replaced by their new values.
-"""
-function _update_parameters(params::ParamsType; kwargs...) where {ParamsType<:NeutrinoFluxParameters}
-
-    # Names of the fields of this parameter type.
-    names = fieldnames(ParamsType) # Note that fieldnames gives Symbols
-                                   # (except in the case of tuples).
-
-    # Catch typos and keywords that belong to another model.
-    bad_keys = [k for k in keys(kwargs) if k ∉ names]
-    isempty(bad_keys) || throw(ArgumentError(
-        "Unknown $(nameof(ParamsType)): $(repr(bad_keys)). Valid: $(collect(names))."))
-
-    # Convert the struct into a NamedTuple...
-    current_params = NamedTuple{names}(ntuple(i -> getfield(params, i), length(names)))
-
-    # Convert the given values to the types the fields expect (e.g. "juno" → :juno).
-    normalized_kwargs = (; (k => _normalize_choice(fieldtype(ParamsType, k), v) for (k, v) in pairs(kwargs))...)
-
-    # ... so that it can be merged with the given normalized keyword arguments.
-    return ParamsType(; merge(current_params, normalized_kwargs)...)
-end
-
-"""
-    _default_flux_dict()
-
-Return a dictionary containing the default neutrino flux configuration,
-including the model specified by `DEFAULT_NUFLUX_MODEL` and the parameter
-values specified by `DEFAULT_NUFLUX_PARAMS`.
-"""
-function _default_flux_dict()
-    
-    # Create a dictionary containing the default neutrino flux parameters.
-    params = DEFAULT_NUFLUX_PARAMS[]
-    f_dict = Dict{String, Any}(
-        String(f) => getfield(params, f) for f in fieldnames(typeof(params))
-    )
- 
-    # Include the default neutrino flux model.
-    f_dict["model"] = DEFAULT_NUFLUX_MODEL[]
-
-    return f_dict
-end
-
-# ============================================================================
 # Mappings
 # ============================================================================
 # These mappings are used to build the file names that are then used to
@@ -216,6 +122,13 @@ const MUON_PROPA_MAPPING = Dict{Symbol, String}(
 )
 
 # ============================================================================
+# Base urls of the different neutrino flux models
+# ============================================================================
+
+const HONDA_BASE_URL = "http://www-rccn.icrr.u-tokyo.ac.jp/mhonda/public/nflx2014"
+const CHENG_BASE_URL = "https://raw.githubusercontent.com/JIECheng2021/atm_nu_flux_data/main"
+
+# ============================================================================
 # Allowed parameters
 # ============================================================================
 
@@ -235,13 +148,135 @@ const DAEMONFLUX_ALLOWED_KEYS = Set{String}([
     "GSF_1", "GSF_2", "GSF_3", "GSF_4", "GSF_5", "GSF_6",
 ])
 
-const FLUX_KEYS      = ("NuMu_flux",     "Nue_flux",     "AntiNuMu_flux",     "AntiNue_flux")
-const FLUX_ERRS_KEYS = ("NuMu_flux_err", "Nue_flux_err", "AntiNuMu_flux_err", "AntiNue_flux_err")
+const FLUX_KEYS      = ("NuMu_flux",     "Nue_flux",    
+                        "AntiNuMu_flux", "AntiNue_flux")
+const FLUX_ERRS_KEYS = ("NuMu_flux_err",     "Nue_flux_err", 
+                        "AntiNuMu_flux_err", "AntiNue_flux_err")
+         
+# ============================================================================
+# Valid energy and angular ranges of each model's tables
+# ============================================================================
+
+const HONDA_E_RANGE    = (0.1, 1.0e4)
+const HONDA_COSθ_RANGE = (-1.0, 1.0)
+
+const CHENG_E_RANGE    = (0.01, 1.0e4)
+const CHENG_COSθ_RANGE = (-1.0, 1.0)
+
+# Associate to each model the corresponding energy and angular ranges.
+const MODEL_2_RANGETYPE = Dict{Symbol, NTuple{2, NTuple{2, Float64}}}(
+    :Honda      => (HONDA_E_RANGE, HONDA_COSθ_RANGE),
+    :Cheng      => (CHENG_E_RANGE, CHENG_COSθ_RANGE),
+)
 
 # ============================================================================
-# Validation and normalization methods
+# Defaults
 # ============================================================================
 
+const DEFAULT_NUFLUX_MODEL  = Ref{Symbol}(:Honda)
+const DEFAULT_NUFLUX_PARAMS = Ref{NeutrinoFluxParameters}(HondaParameters())
+
+"""
+    set_default_neutrino_flux!(model::Symbol; kwargs...)
+
+Set the default neutrino flux model and its parameters (default=Honda),
+analogous to `set_default_planet!`.
+
+The parameter set is built from the defaults of `model`, and the keyword
+arguments override the fields you want to change. Fields not given as keywords
+take the model's default values, they do **not** keep settings from earlier
+calls. Optional keywords update the typed default parameters.
+
+No network access or flux computation occurs here.
+
+# Returns
+A `NamedTuple` `(; model, params)` with the new default model and its
+validated parameter set.
+"""
+function set_default_neutrino_flux!(model::Symbol=:Honda; kwargs...)
+
+    # Check if model is legit.
+    model_validated = _validate_neutrino_flux_model(model)
+
+    # Define default parameters corresponding to the model.
+    params_type = MODEL_2_PARAMSTYPE[model_validated] 
+    params      = params_type()
+
+    # Update any parameters and validate the new parameter set.
+    params_updated   = _update_parameters(params; kwargs...)
+    params_validated = _validate_parameters(params_updated)
+
+    # Commit only after validation succeeded.
+    DEFAULT_NUFLUX_MODEL[]  = model_validated
+    DEFAULT_NUFLUX_PARAMS[] = params_validated
+    return (; model=DEFAULT_NUFLUX_MODEL[], params=DEFAULT_NUFLUX_PARAMS[])
+end
+
+set_default_neutrino_flux!(model::AbstractString; kwargs...) =
+    set_default_neutrino_flux!(Symbol(model); kwargs...)
+
+"""
+    _default_flux_dict()
+
+Return a dictionary containing the default neutrino flux configuration,
+including the model specified by `DEFAULT_NUFLUX_MODEL` and the parameter
+values specified by `DEFAULT_NUFLUX_PARAMS`.
+"""
+function _default_flux_dict()
+    
+    # Create a dictionary containing the default neutrino flux parameters.
+    params = DEFAULT_NUFLUX_PARAMS[]
+    f_dict = Dict{String, Any}(
+        String(f) => getfield(params, f) for f in fieldnames(typeof(params))
+    )
+ 
+    # Include the default neutrino flux model.
+    f_dict["model"] = DEFAULT_NUFLUX_MODEL[]
+
+    return f_dict
+end
+
+# ============================================================================
+# Function that merges default parameters with modified ones
+# ============================================================================
+
+"""
+    _update_parameters(params::NeutrinoFluxParameters; kwargs...)
+
+Return a copy of the parameter set `params` in which (only) the fields given as
+keyword arguments are replaced by their new values.
+"""
+function _update_parameters(params::ParamsType; kwargs...) where {ParamsType<:NeutrinoFluxParameters}
+
+    # Names of the fields of this parameter type.
+    names = fieldnames(ParamsType) # Note that fieldnames gives Symbols
+                                   # (except in the case of tuples).
+
+    # Catch typos and keywords that belong to another model.
+    bad_keys = [k for k in keys(kwargs) if k ∉ names]
+    isempty(bad_keys) || throw(ArgumentError(
+        "Unknown $(nameof(ParamsType)): $(repr(bad_keys)). Valid: $(collect(names))."))
+
+    # Convert the struct into a NamedTuple...
+    current_params = NamedTuple{names}(ntuple(i -> getfield(params, i), length(names)))
+
+    # Convert the given values to the types the fields expect (e.g. "juno" → :juno).
+    normalized_kwargs = (; (k => _normalize_choice(fieldtype(ParamsType, k), v) for (k, v) in pairs(kwargs))...)
+
+    # ... so that it can be merged with the given normalized keyword arguments.
+    return ParamsType(; merge(current_params, normalized_kwargs)...)
+end
+
+# ============================================================================
+# Validation methods
+# ============================================================================
+
+"""
+    _validate_neutrino_flux_model(model::Symbol)
+
+Check that `model` is one of the supported neutrino flux models
+(see `ALLOWED_MODELS`).
+"""
 function _validate_neutrino_flux_model(model::Symbol)
     model in ALLOWED_MODELS ||
         throw(ArgumentError(
@@ -251,6 +286,12 @@ function _validate_neutrino_flux_model(model::Symbol)
     return model
 end
 
+"""
+    _validate_parameters(p::HondaParameters)
+
+Check that every choice in the Honda parameter set `p` is supported, by looking
+it up in the corresponding mapping.
+"""
 function _validate_parameters(p::HondaParameters)
     haskey(LOCATION_MAPPING_H, p.location) ||
         throw(ArgumentError(
@@ -280,6 +321,12 @@ function _validate_parameters(p::HondaParameters)
     return p
 end
 
+"""
+    _validate_parameters(p::DaemonfluxParameters)
+
+Check that every choice in the Daemonflux parameter set `p` is supported, by looking
+it up in the corresponding mapping.
+"""
 function _validate_parameters(p::DaemonfluxParameters)
     p.flux_mode in DAEMONFLUX_ALLOWED_FLUX_MODES ||
         throw(ArgumentError(
@@ -296,6 +343,12 @@ function _validate_parameters(p::DaemonfluxParameters)
     return p
 end
 
+"""
+    _validate_parameters(p::ChengParameters)
+
+Check that every choice in the Cheng parameter set `p` is supported, by looking
+it up in the corresponding mapping.
+"""
 function _validate_parameters(p::ChengParameters)
     haskey(LOCATION_MAPPING_C, p.location) ||
         throw(ArgumentError(
@@ -325,6 +378,10 @@ function _validate_parameters(p::ChengParameters)
     return p
 end
 
+# ============================================================================
+# Normalization methods
+# ============================================================================
+
 """
     _normalize_choice(T, value)
 
@@ -346,64 +403,3 @@ _normalize_choice(::Any, v::AbstractDict) =
 
 # Everything else is left as it is.
 _normalize_choice(::Any, v) = v
-
-# ============================================================================
-# Base urls of the different neutrino flux models
-# ============================================================================
-
-const HONDA_BASE_URL = "http://www-rccn.icrr.u-tokyo.ac.jp/mhonda/public/nflx2014"
-const CHENG_BASE_URL = "https://raw.githubusercontent.com/JIECheng2021/atm_nu_flux_data/main"
-         
-# ============================================================================
-# Valid energy and angular ranges of each model's tables
-# ============================================================================
-
-const HONDA_E_RANGE    = (0.1, 1.0e4)
-const HONDA_COSθ_RANGE = (-1.0, 1.0)
-
-const CHENG_E_RANGE    = (0.01, 1.0e4)
-const CHENG_COSθ_RANGE = (-1.0, 1.0)
-
-# Associate to each model the corresponding energy and angular ranges.
-const MODEL_2_RANGETYPE = Dict{Symbol, NTuple{2, NTuple{2, Float64}}}(
-    :Honda      => (HONDA_E_RANGE, HONDA_COSθ_RANGE),
-    :Cheng      => (CHENG_E_RANGE, CHENG_COSθ_RANGE),
-)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-function _parameters_dict(
-    params::NeutrinoFluxParameters;
-    model::Symbol,
-    bin_centers_arrays=nothing,
-)
-    result = Dict{String,Any}(
-        "model" => _validate_neutrino_flux_model(model),
-        "flux_mode" => params.flux_mode,
-        "return_uncertainties" => params.return_uncertainties,
-        "params_df" => params.params_df,
-        "location_hf" => params.location_hf,
-        "season_hf" => params.season_hf,
-        "angles_separation_hf" => params.angles_separation_hf,
-        "mountain_overburden_hf" => params.mountain_overburden_hf,
-        "solar_activity_hf" => params.solar_activity_hf,
-    )
-    if !isnothing(bin_centers_arrays)
-        result["bin_centers_arrays"] = bin_centers_arrays
-    end
-    return result
-end
