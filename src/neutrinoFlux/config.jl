@@ -88,7 +88,7 @@ function set_default_neutrino_flux!(model::Symbol=:Honda; kwargs...)
 
     # Define default parameters corresponding to the model.
     params_type = MODEL_2_PARAMSTYPE[model_validated] 
-    params = params_type()
+    params      = params_type()
 
     # Update any parameters and validate the new parameter set.
     params_updated   = _update_parameters(params; kwargs...)
@@ -100,6 +100,32 @@ function set_default_neutrino_flux!(model::Symbol=:Honda; kwargs...)
     return (; model=DEFAULT_NUFLUX_MODEL[], params=DEFAULT_NUFLUX_PARAMS[])
 end
 
+"""
+    _update_parameters(params::NeutrinoFluxParameters; kwargs...)
+
+Return a copy of the parameter set `params` in which (only) the fields given as
+keyword arguments are replaced by their new values.
+"""
+function _update_parameters(params::ParamsType; kwargs...) where {ParamsType<:NeutrinoFluxParameters}
+
+    # Names of the fields of this parameter type.
+    names = fieldnames(ParamsType) # Note that fieldnames gives Symbols
+                                   # (except in the case of tuples).
+
+    # Catch typos and keywords that belong to another model.
+    bad_keys = [k for k in keys(kwargs) if k ∉ names]
+    isempty(bad_keys) || throw(ArgumentError(
+        "Unknown $(nameof(ParamsType)): $(repr(bad_keys)). Valid: $(collect(names))."))
+
+    # Convert the struct into a NamedTuple...
+    current_params = NamedTuple{names}(ntuple(i -> getfield(params, i), length(names)))
+
+    # Convert the given values to the types the fields expect (e.g. "juno" → :juno).
+    normalized_kwargs = (; (k => _normalize_choice(fieldtype(ParamsType, k), v) for (k, v) in pairs(kwargs))...)
+
+    # ... so that it can be merged with the given normalized keyword arguments.
+    return ParamsType(; merge(current_params, normalized_kwargs)...)
+end
 
 
 
