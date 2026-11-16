@@ -130,6 +130,27 @@ function _update_parameters(params::ParamsType; kwargs...) where {ParamsType<:Ne
     return ParamsType(; merge(current_params, normalized_kwargs)...)
 end
 
+"""
+    _default_flux_dict()
+
+Return a dictionary containing the default neutrino flux configuration,
+including the model specified by `DEFAULT_NUFLUX_MODEL` and the parameter
+values specified by `DEFAULT_NUFLUX_PARAMS`.
+"""
+function _default_flux_dict()
+    
+    # Create a dictionary containing the default neutrino flux parameters.
+    params = DEFAULT_NUFLUX_PARAMS[]
+    f_dict = Dict{String, Any}(
+        String(f) => getfield(params, f) for f in fieldnames(typeof(params))
+    )
+ 
+    # Include the default neutrino flux model.
+    f_dict["model"] = DEFAULT_NUFLUX_MODEL[]
+
+    return f_dict
+end
+
 # ============================================================================
 # Mappings
 # ============================================================================
