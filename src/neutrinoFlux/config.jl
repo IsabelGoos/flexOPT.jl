@@ -213,7 +213,7 @@ function set_default_neutrino_flux!(model::Symbol=:Honda; kwargs...)
 end
 
 set_default_neutrino_flux!(model::AbstractString; kwargs...) =
-    set_default_neutrino_flux!(Symbol(model); kwargs...)
+    set_default_neutrino_flux!(Symbol(uppercasefirst(lowercase(string(model)))); kwargs...)
 
 """
     _default_flux_dict()
