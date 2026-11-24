@@ -1,3 +1,153 @@
+# ============================================================================
+# Main function
+# ============================================================================
+
+"""
+    produce_neutrino_flux(bin_centers_arrays::Tuple)
+    produce_neutrino_flux(user_params::AbstractDict{String})
+
+Produce the atmospheric neutrino flux on a given binning, using either the
+default neutrino flux model and parameters or substituting with `user_params`.
+
+# Arguments
+- `bin_centers_arrays::Tuple`: binning `(energies, cosθs)`. The flux is
+  computed with the current default model and parameters.
+- `user_params::AbstractDict{String}`: dictionary with the following keys:
+  - `bin_centers_arrays` (required): binning `(energies, cosθs)`.
+  - `model` (optional): replaces the default model.
+  - any other key (optional): a parameter of the chosen model that
+    replaces its default value.
+
+# Returns 
+a 4-tuple (or 8-tuple, if `return_uncertainties::Bool` is true) with the following matrices in the shape (nθ, nE):
+- `NuMu_flux` 
+- `Nue_flux`
+- `AntiNuMu_flux` 
+- `AntiNue_flux`
+(followed by the corresponding uncertainties if `return_uncertainties::Bool` is true, in the same order).
+"""
+produce_neutrino_flux(bin_centers_arrays::NTuple{2, AbstractVector{<:Real}}) =
+    produce_neutrino_flux(Dict{String, Any}("bin_centers_arrays" => bin_centers_arrays))
+
+function produce_neutrino_flux(user_params::Dict{String, Any})
+
+    # Make sure that user_params contains the bin centers.
+    haskey(user_params, "bin_centers_arrays") ||
+        throw(ArgumentError("The key \"bin_centers_arrays\" is required: (energies, cosθs)."))
+
+    # Pick the model and parameter set.
+    if haskey(user_params, "model")
+        model  = _validate_neutrino_flux_model(Symbol(uppercasefirst(lowercase(string(user_params["model"])))))
+        params = MODEL_2_PARAMSTYPE[model]()      
+    else
+        model  = DEFAULT_NUFLUX_MODEL[]
+        params = DEFAULT_NUFLUX_PARAMS[]          
+    end
+
+    # Update parameters. Any problem will be raised by _update_parameters.
+    updates = Dict{Symbol, Any}(
+        Symbol(k) => v for (k, v) in user_params if k ∉ ("model", "bin_centers_arrays")
+    )  
+    params_validated = _validate_parameters(_update_parameters(params; updates...))
+
+    # Dictionary expected by the _produce_*_neutrino_flux functions.
+    nuflux_params = Dict{String, Any}(
+        String(f) => getfield(params_validated, f) for f in fieldnames(typeof(params_validated))
+    )
+    nuflux_params["model"]              = model
+    nuflux_params["bin_centers_arrays"] = user_params["bin_centers_arrays"]
+    return_uncertainties                = nuflux_params["return_uncertainties"]
+    angles_separation                   = nuflux_params["angles_separation"]
+
+    for (key, value) in nuflux_params
+        println(key, " => ", value)
+    end
+
+    # Produce and return atmospheric neutrino flux.
+    if model === :Honda
+        nuflux = _produce_honda_neutrino_flux(nuflux_params)
+    elseif model === :Daemonflux
+        nuflux = _produce_daemonflux_neutrino_flux(nuflux_params)
+    else  # :Cheng
+        nuflux = _produce_cheng_neutrino_flux(nuflux_params)
+    end
+
+    # Interpolate if the models are Honda or Cheng.
+    if model in (:Honda, :Cheng)  
+        E_orig    = nuflux["Energies"]
+        cosθ_orig = nuflux["cosθs"]
+        bins_new  = user_params["bin_centers_arrays"]
+        if angles_separation === :averaged_ϕ
+            nuflux_new = Dict{String, Any}( 
+                key => _get_interpolated_flux(nuflux[key], E_orig, cosθ_orig, model, bins_new)
+                for key in FLUX_KEYS
+            )
+        end
+        if angles_separation === :variable_ϕ
+            ϕ_orig = nuflux["ϕs"]
+            nuflux_new = Dict{String, Any}( 
+                key => _get_interpolated_flux(nuflux[key], E_orig, cosθ_orig, ϕ_orig, model, bins_new)
+                for key in FLUX_KEYS
+            )
+            nuflux_new["ϕs"]    = collect(bins_new[3])
+        end
+        nuflux_new["Energies"] = collect(bins_new[1])
+        nuflux_new["cosθs"]    = collect(bins_new[2])
+
+        # Now that interpolation has been done, uncertainties can be included.
+        if return_uncertainties
+
+            if model === :Honda
+                rel_err = map(E -> E < 10.0 ? 0.07 : (E <= 100.0 ? 0.14 : 0.25), nuflux_new["Energies"])
+                for (key, key_err) in zip(FLUX_KEYS, FLUX_ERRS_KEYS)
+                    nuflux_new[key_err] = nuflux_new[key] .* rel_err
+                end
+            end
+
+            if model === :Cheng
+                E_new    = nuflux_new["Energies"]
+                cosθ_new = nuflux_new["cosθs"]
+
+                E_pts = [0.35, 0.6, 1.0, 2.0, 5.0, 10.0, 30.0, 50.0, 100.0]
+                #                           0.35   0.6    1      2      5     10     30     50    100
+                errs_vert = Dict(
+                    "NuMu_flux_err"     => [0.175, 0.095, 0.058, 0.052, 0.072, 0.090, 0.115, 0.140, 0.180],
+                    "Nue_flux_err"      => [0.225, 0.120, 0.075, 0.050, 0.035, 0.042, 0.075, 0.115, 0.225],
+                    "AntiNuMu_flux_err" => [0.170, 0.090, 0.060, 0.043, 0.038, 0.047, 0.065, 0.075, 0.100],
+                    "AntiNue_flux_err"  => [0.225, 0.120, 0.080, 0.055, 0.042, 0.050, 0.085, 0.125, 0.275],
+                )
+                errs_hor = Dict(
+                    "Nue_flux_err"      => [0.280, 0.130, 0.072, 0.045, 0.030, 0.022, 0.020, 0.020, 0.020],
+                    "NuMu_flux_err"     => [0.200, 0.100, 0.057, 0.048, 0.047, 0.048, 0.054, 0.058, 0.066],
+                    "AntiNuMu_flux_err" => [0.200, 0.100, 0.058, 0.038, 0.030, 0.027, 0.030, 0.033, 0.037],
+                    "AntiNue_flux_err"  => [0.270, 0.130, 0.072, 0.048, 0.032, 0.022, 0.020, 0.020, 0.020],
+                )
+                w = abs.(cosθ_new)'
+
+                for key in FLUX_KEYS
+                    itp_v = extrapolate(interpolate(log10.(E_pts), errs_vert[key * "_err"], FritschCarlsonMonotonicInterpolation()), Flat())
+                    itp_h = extrapolate(interpolate(log10.(E_pts), errs_hor[key * "_err"],  FritschCarlsonMonotonicInterpolation()), Flat())
+
+                    errs_v = itp_v.(log10.(E_new))    
+                    errs_h = itp_h.(log10.(E_new))
+
+                    # Linear interpolation wrt angle.
+                    rel_err = errs_h .+ (errs_v .- errs_h) .* w    
+
+                    nuflux_new[key * "_err"] = nuflux_new[key] .* rel_err
+                end
+
+            end
+
+        end
+
+        nuflux = nuflux_new
+    end
+
+    return nuflux
+end
+
+
 """
     interpolate_flux_at_bin_centers(energies::Vector{Float64}, flux::Matrix{Float64}, energies_in_log::Bool)
 
