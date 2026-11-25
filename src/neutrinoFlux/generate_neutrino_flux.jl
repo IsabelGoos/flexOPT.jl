@@ -10,10 +10,11 @@ Produce the atmospheric neutrino flux on a given binning, using either the
 default neutrino flux model and parameters or substituting with `user_params`.
 
 # Arguments
-- `bin_centers_arrays::Tuple`: binning `(energies, cosθs)`. The flux is
-  computed with the current default model and parameters.
+- `bin_centers_arrays::Tuple`: binning `(energies, cosθgrid)`. The flux is
+  computed with the current default model and parameters. The bin centers for 
+  cosθ have to be given in increasing order.
 - `user_params::AbstractDict{String}`: dictionary with the following keys:
-  - `bin_centers_arrays` (required): binning `(energies, cosθs)`.
+  - `bin_centers_arrays` (required): binning `(energies, cosθgrid)`.
   - `model` (optional): replaces the default model.
   - any other key (optional): a parameter of the chosen model that
     replaces its default value.
@@ -26,14 +27,14 @@ a 4-tuple (or 8-tuple, if `return_uncertainties::Bool` is true) with the followi
 - `AntiNue_flux`
 (followed by the corresponding uncertainties if `return_uncertainties::Bool` is true, in the same order).
 """
-produce_neutrino_flux(bin_centers_arrays::NTuple{2, AbstractVector{<:Real}}) =
+produce_neutrino_flux(bin_centers_arrays::NamedTuple{names, <:NTuple{2, AbstractVector{<:Real}}}) where {names} =
     produce_neutrino_flux(Dict{String, Any}("bin_centers_arrays" => bin_centers_arrays))
 
 function produce_neutrino_flux(user_params::Dict{String, Any})
 
     # Make sure that user_params contains the bin centers.
     haskey(user_params, "bin_centers_arrays") ||
-        throw(ArgumentError("The key \"bin_centers_arrays\" is required: (energies, cosθs)."))
+        throw(ArgumentError("The key \"bin_centers_arrays\" is required: (energies, cosθgrid)."))
 
     # Pick the model and parameter set.
     if haskey(user_params, "model")
@@ -51,31 +52,32 @@ function produce_neutrino_flux(user_params::Dict{String, Any})
     params_validated = _validate_parameters(_update_parameters(params; updates...))
 
     # Dictionary expected by the _produce_*_neutrino_flux functions.
-    nuflux_params = Dict{String, Any}(
+    backend_params = Dict{String, Any}(
         String(f) => getfield(params_validated, f) for f in fieldnames(typeof(params_validated))
     )
-    nuflux_params["model"]              = model
-    nuflux_params["bin_centers_arrays"] = user_params["bin_centers_arrays"]
-    return_uncertainties                = nuflux_params["return_uncertainties"]
-    angles_separation                   = nuflux_params["angles_separation"]
+    backend_params["model"]              = model
+    backend_params["bin_centers_arrays"] = _validate_flux_binning(user_params["bin_centers_arrays"])
 
-    for (key, value) in nuflux_params
+    return_uncertainties                = backend_params["return_uncertainties"]
+    angles_separation                   = backend_params["angles_separation"]
+
+    for (key, value) in backend_params
         println(key, " => ", value)
     end
 
     # Produce and return atmospheric neutrino flux.
     if model === :Honda
-        nuflux = _produce_honda_neutrino_flux(nuflux_params)
+        nuflux = _produce_honda_neutrino_flux(backend_params)
     elseif model === :Daemonflux
-        nuflux = _produce_daemonflux_neutrino_flux(nuflux_params)
+        nuflux = _produce_daemonflux_neutrino_flux(backend_params)
     else  # :Cheng
-        nuflux = _produce_cheng_neutrino_flux(nuflux_params)
+        nuflux = _produce_cheng_neutrino_flux(backend_params)
     end
 
     # Interpolate if the models are Honda or Cheng.
     if model in (:Honda, :Cheng)  
         E_orig    = nuflux["Energies"]
-        cosθ_orig = nuflux["cosθs"]
+        cosθ_orig = nuflux["cosθgrid"]
         bins_new  = user_params["bin_centers_arrays"]
         if angles_separation === :averaged_ϕ
             nuflux_new = Dict{String, Any}( 
@@ -92,7 +94,7 @@ function produce_neutrino_flux(user_params::Dict{String, Any})
             nuflux_new["ϕs"]    = collect(bins_new[3])
         end
         nuflux_new["Energies"] = collect(bins_new[1])
-        nuflux_new["cosθs"]    = collect(bins_new[2])
+        nuflux_new["cosθgrid"] = collect(bins_new[2])
 
         # Now that interpolation has been done, uncertainties can be included.
         if return_uncertainties
@@ -106,7 +108,7 @@ function produce_neutrino_flux(user_params::Dict{String, Any})
 
             if model === :Cheng
                 E_new    = nuflux_new["Energies"]
-                cosθ_new = nuflux_new["cosθs"]
+                cosθ_new = nuflux_new["cosθgrid"]
 
                 E_pts = [0.35, 0.6, 1.0, 2.0, 5.0, 10.0, 30.0, 50.0, 100.0]
                 #                           0.35   0.6    1      2      5     10     30     50    100
@@ -146,6 +148,48 @@ function produce_neutrino_flux(user_params::Dict{String, Any})
 
     return nuflux
 end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 """
@@ -469,24 +513,6 @@ const NeutrinoFluxTable = NamedTuple{
     (:model, :energies, :cosθgrid, :νμ, :νe, :antiνμ, :antiνe, :uncertainties),
 }
 
-function _validate_flux_binning(binning::NamedTuple)
-    hasproperty(binning, :energies) ||
-        throw(ArgumentError("binning must contain energies"))
-    hasproperty(binning, :cosθgrid) ||
-        throw(ArgumentError("binning must contain cosθgrid"))
-    energies = Float64.(collect(binning.energies))
-    cosθgrid = Float64.(collect(binning.cosθgrid))
-    isempty(energies) && throw(ArgumentError("energies cannot be empty"))
-    isempty(cosθgrid) && throw(ArgumentError("cosθgrid cannot be empty"))
-    all(>(0), energies) || throw(ArgumentError("energies must be positive"))
-    all(diff(energies) .> 0) ||
-        throw(ArgumentError("energies must be strictly increasing"))
-    all(-1 .<= cosθgrid .<= 1) ||
-        throw(ArgumentError("cosθgrid values must lie in [-1, 1]"))
-    all(diff(cosθgrid) .> 0) ||
-        throw(ArgumentError("cosθgrid must be strictly increasing"))
-    return (; energies, cosθgrid)
-end
 
 function _resample_honda_flux(
     raw_flux,
@@ -531,7 +557,7 @@ function _flux_table_from_raw(
 
     matrices = if model === :Honda
         native_energies = raw["Energies"]
-        native_cosθ = raw["cosθs"]
+        native_cosθ = raw["cosθgrid"]
         map(flux_names) do name
             _resample_honda_flux(
                 raw[name],
@@ -584,36 +610,7 @@ function _flux_table_from_raw(
     )
 end
 
-"""
-    produce_neutrino_flux(binning;
-        model=DEFAULT_NUFLUX_MODEL[], params=DEFAULT_NUFLUX_PARAMS[])
 
-Produce the selected default flux directly on a flexOPT binning NamedTuple:
-
-    (energies=..., cosθgrid=...)
-
-Unlike the legacy dictionary method, this returns a `NeutrinoFluxTable` whose
-matrices use `(energy, cosθ)` ordering.
-"""
-function produce_neutrino_flux(
-    binning::NamedTuple;
-    model::Symbol=DEFAULT_NUFLUX_MODEL[],
-    params::NeutrinoFluxParameters=DEFAULT_NUFLUX_PARAMS[],
-)
-    selected_model = _validate_neutrino_flux_model(model)
-    selected_params = _validate_neutrino_flux_parameters(params)
-    validated_binning = _validate_flux_binning(binning)
-    backend_params = _parameters_dict(
-        selected_params;
-        model=selected_model,
-        bin_centers_arrays=(
-            validated_binning.energies,
-            validated_binning.cosθgrid,
-        ),
-    )
-    raw = produce_neutrino_flux(backend_params)
-    return _flux_table_from_raw(raw, validated_binning, selected_model)
-end
 
 function _cached_neutrino_flux(config::AbstractDict)
     binning = (
@@ -762,60 +759,6 @@ function plot_neutrino_flux_heatmap(
     return (; figure, axis, plot=heatmap_plot, colorbar)
 end
 
-"""
-    produce_neutrino_flux(bin_centers_arrays; model, flux_mode)
-
-Produce the atmospheric neutrino flux for all relevant neutrino types following a given `model`.
-
-If the `model` `Daemonflux` is chosen, compute the atmospheric neutrino fluxes at `IceCube` 
-using the Daemonflux model (arXiv:2303.00022).
-`Icecube` is, for the moment, the only location for which upgoing neutrinos are computed (July 2026).
-`use_calibration` is set to true so that the Daemonflux calibration is used.
-If the `model` `Honda` is chosen, fetch the atmospheric neutrino fluxes from 
-<http://www-rccn.icrr.u-tokyo.ac.jp/mhonda/public/nflx2014/index.html> (arXiv:1502.03916).
-Neither model provides tau-neutrino or -antineutrino fluxes since they are negligible.
-
-# Arguments
-- `model::String`: `Daemonflux` (default) or `Honda`.
-- `bin_centers_arrays::Tuple{AbstractArray, AbstractArray}`: a 2-tuple containing the bin centers 
-for energy and cosθ. The bin centers for cosθ have to be given in increasing order.
-- `params_df::Union{Nothing, Dict{String, Any}}`: Daemonflux parameters. By default all Daemonflux parameters
-are set to their default values. Only those provided in the `params_df` dictionary are updated to the desired values.
-- `flux_mode::String`: `conventional` or `total` (default). `total` means conventional + prompt (only the 
-conventional componennt is calibrated).
-- `return_uncertainties::Bool`: if true, return neutrino flux uncertainties. Default is false. 
-- `location_hf::String`: location for honda flux, options are `kamioka`, `gran_sasso`, `sudbury`, `frejus`, `ino`, 
-`south_pole`, `pythasalmi`, `homestake`, `juno`
-- `season_hf::String`: season for honda flux, options are `all_year`, `march_may`, `june_aug`, `sept_nov`, `dec_feb`
-- `angles_separation_hf::String`: the way the angles are organized in the honda flux, options are 
-`variable_ϕ`, `averaged_ϕ`, `averaged_ϕθ`
-- `mountain_overburden_hf::String`: `with` or `without`
-- `solar_activity_hf::String`: `minimum` or `maximum`
-
-# Returns 
-a 4-tuple (or 8-tuple, if `return_uncertainties::Bool` is true) with the following matrices 
-in the shape (nθ, nE):
-- `NuMu_flux` 
-- `Nue_flux`
-- `AntiNuMu_flux` 
-- `AntiNue_flux`
-(followed by the corresponding uncertanties if `return_uncertainties::Bool` is true, in the same order).
-"""
-function produce_neutrino_flux(nuflux_params::Dict{String, Any})
-  
-    model = Symbol(nuflux_params["model"])
-
-    if (model === :Daemonflux)
-        results = produce_daemonflux_neutrino_flux(nuflux_params)
-    elseif (model === :Honda)
-        results = produce_honda_neutrino_flux(nuflux_params)
-    else 
-        error("model $model is not supported. Use :Daemonflux or :Honda.")
-    end
-
-    return results
-
-end
 
 """
     produce_daemonflux_neutrino_flux(nuflux_params::Dict{String, Any})
@@ -970,7 +913,7 @@ function produce_honda_neutrino_flux(nuflux_params::Dict{String, Any})
             "AntiNuMu_flux" => collect(flux_reshaped[3, :, :]'),
             "AntiNue_flux"  => collect(flux_reshaped[5, :, :]'),
             "Energies"      => flux_reshaped[1, :, 1],
-            "cosθs"         => range(-1.0, 1.0, length=20)
+            "cosθgrid"         => range(-1.0, 1.0, length=20)
         )
         return results
 
