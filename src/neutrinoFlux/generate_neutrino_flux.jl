@@ -286,6 +286,106 @@ function _produce_honda_neutrino_flux(nuflux_params::Dict{String, Any})
     return results
 end
 
+# ============================================================================
+# Daemonflux model
+# ============================================================================
+
+"""
+    _produce_daemonflux_neutrino_flux(nuflux_params::Dict{String, Any})
+
+Produce the atmospheric neutrino flux for all relevant neutrino types using the Daemonflux model.
+"""
+function _produce_daemonflux_neutrino_flux(nuflux_params::Dict{String, Any})
+    pythoncall = _require_pythoncall()
+    return Base.invokelatest(
+        _produce_daemonflux_neutrino_flux,
+        nuflux_params,
+        pythoncall
+    )
+end
+
+function _produce_daemonflux_neutrino_flux(nuflux_params::Dict{String, Any}, pythoncall)
+
+    # Read some inputs.
+    E_new, cosθ_new      = nuflux_params["bin_centers_arrays"]
+    flux_mode            = nuflux_params["flux_mode"]
+    return_uncertainties = nuflux_params["return_uncertainties"]
+
+    # Import and instantiate Python daemonflux class.
+    nuflux = _get_daemonflux_instance(pythoncall)
+
+    # Convert to degrees, as needed by daemonflux.
+    θ_new = string.(rad2deg.(acos.(cosθ_new)))
+
+    # Pre-allocate output arrays.
+    nE = length(E_new)
+    nθ = length(θ_new)
+    NuMu_flux     = zeros(Float64, nθ, nE)
+    Nue_flux      = zeros(Float64, nθ, nE)
+    AntiNuMu_flux = zeros(Float64, nθ, nE)
+    AntiNue_flux  = zeros(Float64, nθ, nE)
+    if return_uncertainties
+        NuMu_flux_err     = zeros(Float64, nθ, nE)
+        Nue_flux_err      = zeros(Float64, nθ, nE)
+        AntiNuMu_flux_err = zeros(Float64, nθ, nE)
+        AntiNue_flux_err  = zeros(Float64, nθ, nE)
+    end
+
+    # Define key names depending on the chosen flux_mode. 
+    prefix = flux_mode === :total ? "total_" : ""
+    keys = (
+        numu    = prefix * "numu",
+        nue     = prefix * "nue",
+        anumu   = prefix * "antinumu",
+        anue    = prefix * "antinue" 
+    )
+
+    # Set daemonflux parameters.
+    raw_params_df = get(nuflux_params, "params_df", nothing)
+    params = (isnothing(raw_params_df) || isempty(raw_params_df)) ? 
+             _set_dflux_params(nuflux) : 
+             _set_dflux_params(nuflux, raw_params_df)
+
+    # Energy scaling.
+    E_scaling = 1.0e4 ./ (E_new .^ 3)
+
+    # Fetch raw daemonflux values.
+    @views for (i, θ) in enumerate(θ_new)
+        # flux values
+        NuMu_flux[i, :]     .= pyconvert(Vector{Float64}, nuflux.flux(E_new, θ, keys.numu,  params=params)) .* E_scaling
+        Nue_flux[i, :]      .= pyconvert(Vector{Float64}, nuflux.flux(E_new, θ, keys.nue,   params=params)) .* E_scaling
+        AntiNuMu_flux[i, :] .= pyconvert(Vector{Float64}, nuflux.flux(E_new, θ, keys.anumu, params=params)) .* E_scaling
+        AntiNue_flux[i, :]  .= pyconvert(Vector{Float64}, nuflux.flux(E_new, θ, keys.anue,  params=params)) .* E_scaling
+        # flux uncertainties
+        # E_scaling relevant here too? TODO: check
+        if return_uncertainties
+            NuMu_flux_err[i, :]     .= pyconvert(Vector{Float64}, nuflux.error(E_new, θ, keys.numu))
+            Nue_flux_err[i, :]      .= pyconvert(Vector{Float64}, nuflux.error(E_new, θ, keys.nue))
+            AntiNuMu_flux_err[i, :] .= pyconvert(Vector{Float64}, nuflux.error(E_new, θ, keys.anumu))
+            AntiNue_flux_err[i, :]  .= pyconvert(Vector{Float64}, nuflux.error(E_new, θ, keys.anue))
+        end
+    end
+
+    # Prepare dictionary for output.
+    results = Dict{String, Any}(
+        "NuMu_flux"     => NuMu_flux,
+        "Nue_flux"      => Nue_flux,
+        "AntiNuMu_flux" => AntiNuMu_flux,
+        "AntiNue_flux"  => AntiNue_flux
+    )
+    if return_uncertainties
+        results["NuMu_flux_err"]     = NuMu_flux_err
+        results["Nue_flux_err"]      = Nue_flux_err
+        results["AntiNuMu_flux_err"] = AntiNuMu_flux_err
+        results["AntiNue_flux_err"]  = AntiNue_flux_err
+    end
+
+    results["Energies"] = E_new
+    results["cosθs"]    = cosθ_new
+
+    return results
+
+end
 
 
 
@@ -885,104 +985,8 @@ function plot_neutrino_flux_heatmap(
 end
 
 
-"""
-    produce_daemonflux_neutrino_flux(nuflux_params::Dict{String, Any})
 
-Produce the atmospheric neutrino flux for all relevant neutrino types using the Daemonflux model.
 
-See produce_neutrino_flux for more information.
-"""
-function produce_daemonflux_neutrino_flux(nuflux_params::Dict{String, Any})
-    pythoncall = _require_pythoncall()
-    return Base.invokelatest(
-        _produce_daemonflux_neutrino_flux,
-        pythoncall,
-        nuflux_params,
-    )
-end
 
-function _produce_daemonflux_neutrino_flux(
-    pythoncall::Module,
-    nuflux_params::Dict{String,Any},
-)
-    
-    # Read some inputs
-    Ebin_centers, cosθbin_centers = nuflux_params["bin_centers_arrays"]
-    flux_mode            = Symbol(nuflux_params["flux_mode"])
-    return_uncertainties = Bool(nuflux_params["return_uncertainties"])
 
-    # Instantiate Daemonflux and retry transient GitHub release-asset failures.
-    # Once downloaded, Daemonflux reuses its package-local spline cache.
-    flux = _daemonflux_instance(pythoncall)
-
-    # Convert to degrees, as needed by daemonflux
-    θbin_centers = string.(rad2deg.(acos.(cosθbin_centers)))
-
-    # Pre-allocate output arrays
-    nE = length(Ebin_centers)
-    nθ = length(θbin_centers)
-    NuMu_flux     = zeros(Float64, nθ, nE)
-    Nue_flux      = zeros(Float64, nθ, nE)
-    AntiNuMu_flux = zeros(Float64, nθ, nE)
-    AntiNue_flux  = zeros(Float64, nθ, nE)
-    if return_uncertainties
-        NuMu_flux_err     = zeros(Float64, nθ, nE)
-        Nue_flux_err      = zeros(Float64, nθ, nE)
-        AntiNuMu_flux_err = zeros(Float64, nθ, nE)
-        AntiNue_flux_err  = zeros(Float64, nθ, nE)
-    end
-
-    # Check mode and define key names depending on the chosen flux_mode 
-    if flux_mode !== :total && flux_mode !== :conventional
-        error("flux_mode $flux_mode is not a valid option. Use :total or :conventional.")
-    end
-    prefix = flux_mode === :total ? "total_" : ""
-    keys = (
-        numu    = prefix * "numu",
-        nue     = prefix * "nue",
-        anumu   = prefix * "antinumu",
-        anue    = prefix * "antinue" 
-    )
-
-    # Set daemonflux parameters
-    raw_params_df = get(nuflux_params, "params_df", nothing)
-    params = (isnothing(raw_params_df) || isempty(raw_params_df)) ? 
-             _set_dflux_params(pythoncall, flux, Dict{String, Any}()) :
-             _set_dflux_params(pythoncall, flux, raw_params_df)
-            
-    # Energy scaling
-    E_scaling = 1.e4 ./ (Ebin_centers .^ 3)
-    # Fetch raw daemonflux values
-    @views for (i, θ) in enumerate(θbin_centers)
-        # flux values
-        NuMu_flux[i, :]     .= pythoncall.pyconvert(Vector{Float64}, flux.flux(Ebin_centers, θ, keys.numu,  params=params)) .* E_scaling
-        Nue_flux[i, :]      .= pythoncall.pyconvert(Vector{Float64}, flux.flux(Ebin_centers, θ, keys.nue,   params=params)) .* E_scaling
-        AntiNuMu_flux[i, :] .= pythoncall.pyconvert(Vector{Float64}, flux.flux(Ebin_centers, θ, keys.anumu, params=params)) .* E_scaling
-        AntiNue_flux[i, :]  .= pythoncall.pyconvert(Vector{Float64}, flux.flux(Ebin_centers, θ, keys.anue,  params=params)) .* E_scaling
-        if return_uncertainties
-            # flux uncertainties
-            NuMu_flux_err[i, :]     .= pythoncall.pyconvert(Vector{Float64}, flux.error(Ebin_centers, θ, keys.numu))
-            Nue_flux_err[i, :]      .= pythoncall.pyconvert(Vector{Float64}, flux.error(Ebin_centers, θ, keys.nue))
-            AntiNuMu_flux_err[i, :] .= pythoncall.pyconvert(Vector{Float64}, flux.error(Ebin_centers, θ, keys.anumu))
-            AntiNue_flux_err[i, :]  .= pythoncall.pyconvert(Vector{Float64}, flux.error(Ebin_centers, θ, keys.anue))
-        end
-    end
-
-    # Prepare dictionary for output
-    results = Dict{String, Matrix{Float64}}(
-        "NuMu_flux"     => NuMu_flux,
-        "Nue_flux"      => Nue_flux,
-        "AntiNuMu_flux" => AntiNuMu_flux,
-        "AntiNue_flux"  => AntiNue_flux
-    )
-    if return_uncertainties
-        results["NuMu_flux_err"]     = NuMu_flux_err
-        results["Nue_flux_err"]      = Nue_flux_err
-        results["AntiNuMu_flux_err"] = AntiNuMu_flux_err
-        results["AntiNue_flux_err"]  = AntiNue_flux_err
-    end
-
-    return results
-
-end
 
