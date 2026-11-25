@@ -163,6 +163,10 @@ const HONDA_COSθ_RANGE = (-1.0, 1.0)
 const CHENG_E_RANGE    = (0.01, 1.0e4)
 const CHENG_COSθ_RANGE = (-1.0, 1.0)
 
+const DAEMON_E_RANGE    = (1.0, 1.0e8)
+const DAEMON_COSθ_RANGE = (-1.0, 1.0)
+
+
 # Associate to each model the corresponding energy and angular ranges.
 const MODEL_2_RANGETYPE = Dict{Symbol, NTuple{2, NTuple{2, Float64}}}(
     :Honda      => (HONDA_E_RANGE, HONDA_COSθ_RANGE),
