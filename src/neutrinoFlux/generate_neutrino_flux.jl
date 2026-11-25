@@ -189,7 +189,38 @@ function _validate_flux_binning(
     return (; energies, cosθgrid)
 end
 
+"""
+    _check_bins_in_range(E_new, cosθ_new, E_range, cosθ_range; rtol=1e-8)
 
+Check that a requested binning lies inside the allowed range, 
+so that interpolation never needs to extrapolate.
+
+# Arguments
+- `E_new`: requested energies, in GeV.
+- `cosθ_new`: requested cosines of the zenith angle.
+- `E_range`: allowed energy range.
+- `cosθ_range`: allowed angular range.
+
+# Keywords
+- `rtol::Real = 1e-8`: tolerance.
+"""
+function _check_bins_in_range(E_new, cosθ_new, E_range, cosθ_range; rtol=1e-8)
+
+    # Accepted energy and angular ranges.
+    E_lo,  E_hi  = E_range
+    ct_lo, ct_hi = cosθ_range
+
+    # Proposed energy and angular ranges.
+    Emin,  Emax  = extrema(E_new)
+    ctmin, ctmax = extrema(cosθ_new)
+
+    # Check, with some tolerance, if the proposed ranges are within the accepted ones.
+    (Emin >= E_lo * (1 - rtol) && Emax <= E_hi * (1 + rtol)) ||
+        throw(ArgumentError("Energies [$Emin, $Emax] GeV are outside the allowed range [$E_lo, $E_hi] GeV."))
+    (ctmin >= ct_lo - rtol && ctmax <= ct_hi + rtol) ||
+        throw(ArgumentError("cosθ values [$ctmin, $ctmax] are outside the allowed range [$ct_lo, $ct_hi]."))
+    return nothing
+end
 
 
 
