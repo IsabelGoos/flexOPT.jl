@@ -222,14 +222,69 @@ function _check_bins_in_range(E_new, cosθ_new, E_range, cosθ_range; rtol=1e-8)
     return nothing
 end
 
+# ============================================================================
+# Individual functions for each neutrino flux model
+# ============================================================================
 
+# ============================================================================
+# Honda model
+# ============================================================================
 
+"""
+    _produce_honda_neutrino_flux(nuflux_params::Dict{String, Any})
 
+Produce the atmospheric neutrino flux for all relevant neutrino types using the Honda model.
+"""
+function _produce_honda_neutrino_flux(nuflux_params::Dict{String, Any})
 
+    # Read parameters and build url from where to fetch the data.
+    url_honda  = _build_flux_url(nuflux_params)
+    angles_sep = nuflux_params["angles_separation"]
+    return_uncertainties = nuflux_params["return_uncertainties"]
+    
+    # Download.
+    decompressed_stream = download_nuflux(url_honda)
+    
+    # Read the text grid into a matrix, omitting any lines with text.
+    lines = readlines(decompressed_stream)
+    close(decompressed_stream)
+    numeric_lines = filter(line -> occursin(r"^\s*[0-9.-]", line), lines)
+    clean_text_block = join(numeric_lines, "\n")
+    matrix_2d = readdlm(IOBuffer(clean_text_block), Float64)
+    
+    # Reshape, based on angular separation mode.
 
+    # :averaged_ϕ-grid layout: 5 columns x 101 energies x 20 cosθ steps
+    if angles_sep === :averaged_ϕ
 
+        n_E    = 101
+        n_cosθ = 20
+        flux_reshaped = reshape(matrix_2d, n_E, n_cosθ, 5)
 
+        # Extract matrices.
+        results = Dict{String, Any}(
+            "NuMu_flux"     => collect(flux_reshaped[:, :, 2]),
+            "Nue_flux"      => collect(flux_reshaped[:, :, 4]),
+            "AntiNuMu_flux" => collect(flux_reshaped[:, :, 3]),
+            "AntiNue_flux"  => collect(flux_reshaped[:, :, 5]),
+            "Energies"      => flux_reshaped[:, 1, 1],
+            "cosθs"         => range(-1.0, .9, length=n_cosθ).+0.05
+        )
 
+    elseif angles_sep === :variable_ϕ
+        # TODO: Implement the reshaping logic for the azimuth-dependent grid
+        error("angles_separation_hf mode :variable_ϕ is not yet implemented.")
+
+    elseif angles_sep === :averaged_ϕθ
+        # TODO: Implement the reshaping logic for the fully integrated/averaged grid
+        error("angles_separation_hf mode :averaged_ϕθ is not yet implemented.")
+
+    else
+        error("Invalid angles_separation_hf option: $angles_sep. Use :variable_ϕ, :averaged_ϕ, or :averaged_ϕθ.")
+    end
+
+    return results
+end
 
 
 
@@ -931,72 +986,3 @@ function _produce_daemonflux_neutrino_flux(
 
 end
 
-"""
-    produce_honda_neutrino_flux(nuflux_params::Dict{String, Any})
-
-Produce the atmospheric neutrino flux for all relevant neutrino types using the honda model.
-
-See produce_neutrino_flux for more information.
-"""
-function produce_honda_neutrino_flux(nuflux_params::Dict{String, Any})
-
-    # Read parameters and define url from where to fetch the data
-    url_honda  = set_hflux_params(nuflux_params)
-    angles_sep = Symbol(nuflux_params["angles_separation_hf"])
-    
-    # Download and decompression
-    io_buffer = IOBuffer()
-    try
-        Downloads.download(url_honda, io_buffer)
-    catch e 
-        if e isa Downloads.RequestError
-            error("Failed to download Honda flux. The URL does not exist or the server is down.\nURL attempted: $url_honda\nDetails: $(e.message)")
-        else
-            rethrow(e) 
-        end
-    end
-    seekstart(io_buffer)
-    
-    # Decompress
-    decompressed_stream = GzipDecompressorStream(io_buffer)
-    
-    # Read the text grid into a Matrix{Float64}, omit any lines with text 
-    lines = readlines(decompressed_stream)
-    close(decompressed_stream)
-    numeric_lines = filter(line -> occursin(r"^\s*[0-9.-]", line), lines)
-    clean_text_block = join(numeric_lines, "\n")
-    matrix_2d = readdlm(IOBuffer(clean_text_block), Float64)
-    
-    # Reshaping based on angular separation mode
-    if angles_sep === :averaged_ϕ
-
-        # Grid layout: 5 columns x 101 energies x 20 cosθ steps
-        n_E    = 101
-        n_cosθ = 20
-        flux_reshaped = reshape(matrix_2d', 5, n_E, n_cosθ)
-
-        # Extract matrices and transpose using optimization views ('.') 
-        # to match your required shape without unnecessary memory allocation.
-        results = Dict{String, Any}(
-            "NuMu_flux"     => collect(flux_reshaped[2, :, :]'),
-            "Nue_flux"      => collect(flux_reshaped[4, :, :]'),
-            "AntiNuMu_flux" => collect(flux_reshaped[3, :, :]'),
-            "AntiNue_flux"  => collect(flux_reshaped[5, :, :]'),
-            "Energies"      => flux_reshaped[1, :, 1],
-            "cosθgrid"         => range(-1.0, 1.0, length=20)
-        )
-        return results
-
-    elseif angles_sep === :variable_ϕ
-        # TODO: Implement the reshaping logic for the azimuth-dependent grid
-        error("angles_separation_hf mode :variable_ϕ is not yet implemented.")
-
-    elseif angles_sep === :averaged_ϕθ
-        # TODO: Implement the reshaping logic for the fully integrated/averaged grid
-        error("angles_separation_hf mode :averaged_ϕθ is not yet implemented.")
-
-    else
-        error("Invalid angles_separation_hf option: $angles_sep. Use :variable_ϕ, :averaged_ϕ, or :averaged_ϕθ.")
-    end
-
-end
