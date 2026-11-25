@@ -304,7 +304,7 @@ function _produce_daemonflux_neutrino_flux(nuflux_params::Dict{String, Any})
     )
 end
 
-function _produce_daemonflux_neutrino_flux(nuflux_params::Dict{String, Any}, pythoncall)
+function _produce_daemonflux_neutrino_flux(nuflux_params::Dict{String, Any}, pythoncall::Module)
 
     # Read some inputs.
     E_new, cosθ_new      = nuflux_params["bin_centers_arrays"]
@@ -387,15 +387,77 @@ function _produce_daemonflux_neutrino_flux(nuflux_params::Dict{String, Any}, pyt
 
 end
 
+"""
+    _set_dflux_params(flux_obj)
 
+Initialize a dictionary of Daemonflux parameters set to their default values.
 
+# Arguments
+- `flux_obj`: A Python object representing a Daemonflux instance.
+"""
+function _set_dflux_params(flux_obj)
+    pythoncall = _require_pythoncall()
+    return Base.invokelatest(_set_dflux_params, flux_obj, pythoncall)
+end
 
+function _set_dflux_params(flux_obj, pythoncall::Module)
 
+    # Fetch all the Daemonflux parameter names. 
+    params = pythoncall.pyconvert(
+        Vector{String},
+        flux_obj.params.known_parameters,
+    )
 
+    # Set all parameters to 0 
+    # (meaning that their difference with respect to the default parameters is zero).
+    params_dict = Dict(p => 0.0 for p in params) 
+    
+    return params_dict
 
+end
 
+"""
+    _set_dflux_params(flux_obj, params_dict)
 
+Initialize a dictionary of Daemonflux parameters to those values given in `params_dict`.
+Those parameters not mentioned there are set to default values.
 
+# Arguments
+- `flux_obj`: A Python object representing a Daemonflux instance.
+- `params_dict`: A dictionary with those pairs of parameter names and values which should be modified.
+The possible parameter names are K+_158G, K+_2P, K+_31G, K-_158G, K-_2P, K-_31G, n_158G, n_2P, p_158G, p_2P, 
+pi+_158G, pi+_20T, pi+_2P, pi+_31G, pi-_158G, pi-_20T, pi-_2P, pi-_31G, GSF_1, GSF_2, GSF_3, GSF_4, GSF_5, GSF_6.
+The get_dflux_param_value function helps find specific values.
+
+# Returns
+- `Dict{String, Float64}` 
+"""
+function _set_dflux_params(flux_obj, params_df_dict::Union{Nothing, Dict{String, Any}})
+    pythoncall = _require_pythoncall()
+    return Base.invokelatest(
+        _set_dflux_params,
+        flux_obj,
+        params_dict,
+        pythoncall
+    )
+end
+
+function _set_dflux_params(flux_obj, params_df_dict::Union{Nothing, Dict{String, Any}}, pythoncall::Module)
+
+    # Set default Daemonflux parameters.
+    full_params = _set_dflux_params(flux_obj, pythoncall)
+
+    # If params_df_dict is nothing, just return the defaults without trying to merge.
+    if isnothing(params_df_dict)
+        return full_params
+    end
+
+    # Otherwise, update with pairs from params_dict.
+    merge!(full_params, params_df_dict)
+
+    return full_params
+
+end
 
 
 
@@ -545,76 +607,8 @@ function _prefetch_daemonflux_data!(
     )
 end
 
-function set_dflux_params(flux_obj)
-    pythoncall = _require_pythoncall()
-    return Base.invokelatest(_set_dflux_params, pythoncall, flux_obj)
-end
 
-function _set_dflux_params(pythoncall::Module, flux_obj)
 
-    # Fetch all the Daemonflux parameter names 
-    params = pythoncall.pyconvert(
-        Vector{String},
-        flux_obj.params.known_parameters,
-    )
-
-    # Set all parameters to 0 (meaning that their difference with respect to the
-    # default parameters is zero)
-    params_dict = Dict(p => 0.0 for p in params) 
-    
-    return params_dict
-
-end
-
-"""
-    set_dflux_params(flux_obj, params_dict)
-
-Initialize a dictionary of Daemonflux parameters to those values given in `params_dict`.
-Those parameters not mentioned there are set to default values.
-
-# Arguments
-- `flux_obj`: A Python object representing a Daemonflux instance.
-- `params_dict`: A dictionary with those pairs of parameter names and values which should be modified.
-The possible parameter names are K+_158G, K+_2P, K+_31G, K-_158G, K-_2P, K-_31G, n_158G, n_2P, p_158G, p_2P, 
-pi+_158G, pi+_20T, pi+_2P, pi+_31G, pi-_158G, pi-_20T, pi-_2P, pi-_31G, GSF_1, GSF_2, GSF_3, GSF_4, GSF_5, GSF_6.
-The get_dflux_param_value function helps find specific values.
-
-# Returns
-- `Dict{String, Float64}` 
-"""
-function set_dflux_params(
-    flux_obj,
-    params_dict::Union{Nothing,Dict{String,Any}},
-)
-    pythoncall = _require_pythoncall()
-    return Base.invokelatest(
-        _set_dflux_params,
-        pythoncall,
-        flux_obj,
-        params_dict,
-    )
-end
-
-function _set_dflux_params(
-    pythoncall::Module,
-    flux_obj,
-    params_dict::Union{Nothing,Dict{String,Any}},
-)
-
-    # Set default Daemonflux parameters
-    full_params = _set_dflux_params(pythoncall, flux_obj)
-
-    # If params_dict is nothing, just return the defaults without trying to merge
-    if isnothing(params_dict)
-        return full_params
-    end
-
-    # Otherwise, update with pairs from params_dict
-    merge!(full_params, params_dict)
-
-    return full_params
-
-end
 
 """
     get_dflux_param_value(flux_obj, param_name, signed_sigma; max_iterations=10000, max_param=10., tol=0.01)
