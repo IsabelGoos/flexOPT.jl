@@ -162,7 +162,9 @@ Validate the binning of a neutrino flux table and return clean grids.
 - `bin_centers_arrays::NamedTuple`: must contain exactly two real-valued vectors,
   named `energies` and `cosθgrid`.
 """
-function _validate_flux_binning(bin_centers_arrays::NamedTuple{names, <:NTuple{2, AbstractVector{<:Real}}}) where {names}
+function _validate_flux_binning(
+    bin_centers_arrays::NamedTuple{names, <:NTuple{2, AbstractVector{<:Real}}},
+    model::Symbol) where {names}
 
     # Check the names.
     hasproperty(bin_centers_arrays, :energies) ||
@@ -176,13 +178,13 @@ function _validate_flux_binning(bin_centers_arrays::NamedTuple{names, <:NTuple{2
     isempty(energies) && throw(ArgumentError("`energies` cannot be empty."))
     isempty(cosθgrid) && throw(ArgumentError("`cosθgrid` cannot be empty."))
     
-    # Check that energies are positive and strictly increasing.
-    all(>(0), energies) || throw(ArgumentError("`energies` must be positive."))
+    # Check that energies and cosθgrid are strictly increasing.
     all(diff(energies) .> 0) || throw(ArgumentError("`energies` must be strictly increasing."))
-
-    # Check that cosθs in cosθgrid are positive and strictly increasing.
-    all(-1 .<= cosθgrid .<= 1) || throw(ArgumentError("`cosθgrid` values must lie in [-1, 1]."))
     all(diff(cosθgrid) .> 0) || throw(ArgumentError("`cosθgrid` must be strictly increasing."))
+
+    # Check if the new bin centers are within the allowed range.
+    E_range, cosθ_range = MODEL_2_RANGETYPE[model]
+    _check_bins_in_range(energies, cosθgrid, E_range, cosθ_range)
     
     return (; energies, cosθgrid)
 end
