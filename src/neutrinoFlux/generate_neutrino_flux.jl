@@ -388,6 +388,42 @@ function _produce_daemonflux_neutrino_flux(nuflux_params::Dict{String, Any}, pyt
 end
 
 """
+    _get_daemonflux_instance(pythoncall::Module; retries=3, retry_delay=2)
+
+Create and return the Python `daemonflux.Flux` object for IceCube, using the `pythoncall` module. 
+"""
+function _get_daemonflux_instance(
+    pythoncall::Module;
+    retries::Integer=3,
+    retry_delay::Real=2,
+)
+    retries >= 1 || throw(ArgumentError("`retries` must be at least 1."))
+    daemonflux = pythoncall.pyimport("daemonflux")
+    for attempt in 1:retries
+        try
+            return daemonflux.Flux(
+                location="IceCube",
+                use_calibration=true,
+                debug=1,
+            )
+        catch error_pc
+            if attempt == retries
+                message = sprint(showerror, error_pc)
+                throw(ErrorException(
+                    "Daemonflux could not initialize after $retries attempts. " *
+                    "Its official GitHub release may be temporarily unreachable. " *
+                    "Check access to github repository, " *
+                    "and retry the computation.\n" *
+                    "Last Python error:\n$message",
+                ))
+            end
+            sleep(retry_delay * 2.0^(attempt - 1))
+        end
+    end
+    error("Daemonflux unreachable.")
+end
+
+"""
     _set_dflux_params(flux_obj)
 
 Initialize a dictionary of Daemonflux parameters set to their default values.
@@ -767,7 +803,18 @@ function _get_interpolated_flux(Phi_orig::AbstractArray{<:Real, 3},
     return Phi_new
 end
 
+# ============================================================================
+# Python call
+# ============================================================================
 
+# Identifier of the PythonCall package.
+const _PYTHONCALL_PKGID = Base.PkgId(
+    Base.UUID("6099a3de-0909-46bc-b1f4-468b9a2dfc0d"),
+    "PythonCall",
+)
+
+# Load PythonCall on first call and return the module (cheap afterwards).
+_require_pythoncall() = Base.require(_PYTHONCALL_PKGID)
 
 
 
@@ -824,23 +871,6 @@ function interpolate_flux_at_bin_centers(
 
 end
 
-"""
-    set_dflux_params(flux_obj)
-
-Initialize a dictionary of Daemonflux parameters set to their default values.
-
-# Arguments
-- `flux_obj`: A Python object representing a Daemonflux instance.
-
-# Returns
-- `Dict{String, Float64}`: A dictionary mapping parameter names to `0.0`.
-"""
-const _PYTHONCALL_PKGID = Base.PkgId(
-    Base.UUID("6099a3de-0909-46bc-b1f4-468b9a2dfc0d"),
-    "PythonCall",
-)
-
-_require_pythoncall() = Base.require(_PYTHONCALL_PKGID)
 
 function _daemonflux_instance(
     pythoncall::Module;
@@ -1008,25 +1038,6 @@ function _get_dflux_param_value(
 
     error("Bisection failed to converge within $max_iterations iterations. Check your parameters.")
 
-end
-
-function set_hflux_params(nuflux_params::Dict{String, Any})
-
-    loc        = Symbol(nuflux_params["location_hf"])
-    season     = Symbol(nuflux_params["season_hf"])
-    angles_sep = Symbol(nuflux_params["angles_separation_hf"])
-    mountain   = Symbol(nuflux_params["mountain_overburden_hf"])
-    solar      = Symbol(nuflux_params["solar_activity_hf"])
-
-    loc_str    = LOCATION_MAPPING[loc]        
-    season_str = SEASON_MAPPING[season]
-    angles_str = ANGLES_MAPPING[angles_sep]
-    mtn_str    = MOUNTAIN_MAPPING[mountain]
-    solar_str  = SOLAR_MAPPING[solar]
-
-    filename = "http://www-rccn.icrr.u-tokyo.ac.jp/mhonda/public/nflx2014/$(loc_str)-$(season_str)-$(angles_str)$(mtn_str)-$(solar_str).d.gz"
-    return filename
-    
 end
 
 """
