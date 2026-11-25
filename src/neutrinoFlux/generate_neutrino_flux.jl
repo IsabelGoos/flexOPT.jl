@@ -605,6 +605,80 @@ function _produce_cheng_neutrino_flux(nuflux_params::Dict{String, Any})
     return results
 end
 
+# ============================================================================
+# Function that builds the urls of the different neutrino flux models
+# ============================================================================
+
+"""
+    _params_from_dict(nuflux_params::Dict{String, Any})
+
+Rebuild the parameter struct from the dictionary `nuflux_params`.
+"""
+function _params_from_dict(nuflux_params::Dict{String, Any})
+    ParamsType = MODEL_2_PARAMSTYPE[nuflux_params["model"]]
+    fields = (Symbol(k) => v for (k, v) in nuflux_params
+              if k ∉ ("model", "bin_centers_arrays"))
+    return ParamsType(; fields...)
+end
+
+_build_flux_url(nuflux_params::Dict{String, Any}) =
+    _build_flux_url(_params_from_dict(nuflux_params))
+
+function _build_flux_url(p::HondaParameters)
+
+    loc   = LOCATION_MAPPING_H[p.location]
+    seas  = SEASON_MAPPING[p.season]
+    ang   = ANGLES_MAPPING[p.angles_separation]
+    sol   = SOLAR_MAPPING[p.solar_activity].honda 
+    mtn   = MOUNTAIN_MAPPING[p.mountain_overburden]
+
+    return "$HONDA_BASE_URL/$loc-$seas-$ang$mtn-$sol.d.gz"
+end
+
+function _build_flux_url(p::ChengParameters)
+
+    loc1  = LOCATION_MAPPING_C[p.location][1]
+    loc2  = LOCATION_MAPPING_C[p.location][2]
+    seas  = SEASON_MAPPING[p.season]
+    ang   = ANGLES_MAPPING[p.angles_separation]
+    sol1  = SOLAR_MAPPING[p.solar_activity].cheng 
+    sol2  = SOLAR_MAPPING[p.solar_activity].honda 
+    mu    = MUON_PROPA_MAPPING[p.muon_propa_earth]
+
+    return "$CHENG_BASE_URL/$loc1/$(sol1)_$mu/$loc2-$seas-$ang-$sol2.d"
+end
+
+"""
+    download_nuflux(url::String)
+
+Download a neutrino flux and return a stream of its decompressed contents.
+"""
+function download_nuflux(url::String)
+    
+    # Download into an in-memory buffer and get the raw bytes.
+    io_buffer = IOBuffer()
+    try
+        Downloads.download(url, io_buffer; timeout = 60)
+    catch e 
+        if e isa Downloads.RequestError
+            error("Failed to download the flux table. The URL does not exist or the server is down.\n" *
+                  "URL attempted: $url\nDetails: $(sprint(showerror, e))")        
+        else
+            rethrow(e) 
+        end
+    end
+    data = take!(io_buffer)
+    
+    # Gzip files start with the bytes 0x1f 0x8b.
+    is_gzip = length(data) >= 2 && data[1] == 0x1f && data[2] == 0x8b
+
+    # Decompress, if possible.
+    decompressed_stream = is_gzip ? GzipDecompressorStream(IOBuffer(data)) : IOBuffer(data)
+
+    return decompressed_stream
+end
+
+
 
 
 
