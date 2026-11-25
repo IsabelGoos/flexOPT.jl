@@ -149,6 +149,43 @@ function produce_neutrino_flux(user_params::Dict{String, Any})
     return nuflux
 end
 
+# ============================================================================
+# Validation methods
+# ============================================================================
+
+"""
+    _validate_flux_binning(bin_centers_arrays)
+
+Validate the binning of a neutrino flux table and return clean grids.
+
+# Arguments
+- `bin_centers_arrays::NamedTuple`: must contain exactly two real-valued vectors,
+  named `energies` and `cosθgrid`.
+"""
+function _validate_flux_binning(bin_centers_arrays::NamedTuple{names, <:NTuple{2, AbstractVector{<:Real}}}) where {names}
+
+    # Check the names.
+    hasproperty(bin_centers_arrays, :energies) ||
+        throw(ArgumentError("`bin_centers_arrays` must contain `energies`."))
+    hasproperty(bin_centers_arrays, :cosθgrid) ||
+        throw(ArgumentError("`bin_centers_arrays` must contain `cosθgrid`."))
+
+    # Check that the arrays are not empty.
+    energies = Float64.(collect(bin_centers_arrays.energies))
+    cosθgrid = Float64.(collect(bin_centers_arrays.cosθgrid))
+    isempty(energies) && throw(ArgumentError("`energies` cannot be empty."))
+    isempty(cosθgrid) && throw(ArgumentError("`cosθgrid` cannot be empty."))
+    
+    # Check that energies are positive and strictly increasing.
+    all(>(0), energies) || throw(ArgumentError("`energies` must be positive."))
+    all(diff(energies) .> 0) || throw(ArgumentError("`energies` must be strictly increasing."))
+
+    # Check that cosθs in cosθgrid are positive and strictly increasing.
+    all(-1 .<= cosθgrid .<= 1) || throw(ArgumentError("`cosθgrid` values must lie in [-1, 1]."))
+    all(diff(cosθgrid) .> 0) || throw(ArgumentError("`cosθgrid` must be strictly increasing."))
+    
+    return (; energies, cosθgrid)
+end
 
 
 
