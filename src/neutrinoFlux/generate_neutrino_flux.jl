@@ -20,11 +20,13 @@ default neutrino flux model and parameters or substituting with `user_params`.
     replaces its default value.
 
 # Returns 
-a 4-tuple (or 8-tuple, if `return_uncertainties::Bool` is true) with the following matrices in the shape (nθ, nE):
+a 6-tuple (or 10-tuple, if `return_uncertainties::Bool` is true) with the following matrices in the shape (nθ, nE):
 - `NuMu_flux` 
 - `Nue_flux`
 - `AntiNuMu_flux` 
 - `AntiNue_flux`
+- `Energies`
+- `cosθs`
 (followed by the corresponding uncertainties if `return_uncertainties::Bool` is true, in the same order).
 """
 produce_neutrino_flux(bin_centers_arrays::NamedTuple{names, <:NTuple{2, AbstractVector{<:Real}}}) where {names} =
@@ -183,15 +185,15 @@ function produce_or_load_neutrino_flux(
     validated_binning = _validate_flux_binning(bin_centers_arrays)
 
     # Everything that determines the flux goes into the cache key.
-    config_dict = Dict{String,Any}(
+    config_dict = Dict{String, Any}(
         "model"    => model,
         "params"   => params,
         "energies" => validated_binning.energies,
         "cosθgrid" => validated_binning.cosθgrid,
     )
  
-    # Load from disk if an entry with this config exists; otherwise compute
-    # it with `_cached_neutrino_flux` and store it.
+    # Load from disk if an entry with this config_dict exists; 
+    # otherwise compute it with `_cached_neutrino_flux` and store it.
     cached = myProduceOrLoad(
         _cached_neutrino_flux,
         config_dict,
@@ -203,6 +205,41 @@ function produce_or_load_neutrino_flux(
     haskey(cached, "table") ||
         error("invalid neutrino-flux cache entry: missing \"table\"")
     return cached["table"]
+end
+
+"""
+    _cached_neutrino_flux(config::AbstractDict) 
+
+Compute a neutrino flux table from a cache-key dictionary. This is the function
+that `myProduceOrLoad` calls on a cache miss, so its input is exactly the cache
+key built in [`produce_or_load_neutrino_flux`](@ref).
+
+# Arguments
+- `config::AbstractDict`: must contain the keys
+  - `"energies"`: energy bin centers,
+  - `"cosθgrid"`: cosθ bin centers,
+  - `"model"`: flux model (e.g. `:Honda`),
+  - `"params"`: parameter set of that model.
+
+# Returns
+A `Dict{String, Any}` with a single entry `"table"` holding the
+`NeutrinoFluxTable` named tuple from [`produce_neutrino_flux`](@ref).
+"""
+function _cached_neutrino_flux(config_dict::AbstractDict)
+
+    # Rebuild the binning named tuple from the cache key.
+    binning = (
+        energies = config_dict["energies"],
+        cosθgrid = config_dict["cosθgrid"],
+    )
+
+    # Generate the flux table with the model and parameters stored in the key,
+    # not with the current global defaults, so the result always matches the key.
+    table = produce_neutrino_flux(binning)
+    
+    # DrWatson's metadata/tagging layer requires an AbstractDict. Keep that
+    # implementation detail inside the cache and expose only the named tuple.
+    return Dict{String, Any}("table" => table)
 end
 
 # ============================================================================
@@ -892,105 +929,3 @@ const _PYTHONCALL_PKGID = Base.PkgId(
 
 # Load PythonCall on first call and return the module (cheap afterwards).
 _require_pythoncall() = Base.require(_PYTHONCALL_PKGID)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-function _flux_table_from_raw(
-    raw::AbstractDict,
-    binning::NamedTuple,
-    model::Symbol,
-)
-    (; energies, cosθgrid) = _validate_flux_binning(binning)
-    flux_names = ("NuMu_flux", "Nue_flux", "AntiNuMu_flux", "AntiNue_flux")
-    all(name -> haskey(raw, name), flux_names) ||
-        throw(ArgumentError("flux backend returned an incomplete flux table"))
-
-    matrices = if model === :Honda
-        native_energies = raw["Energies"]
-        native_cosθ = raw["cosθgrid"]
-        map(flux_names) do name
-            _resample_honda_flux(
-                raw[name],
-                native_energies,
-                native_cosθ,
-                energies,
-                cosθgrid,
-            )
-        end
-    else
-        expected_size = (length(cosθgrid), length(energies))
-        map(flux_names) do name
-            matrix = Float64.(raw[name])
-            size(matrix) == expected_size ||
-                throw(DimensionMismatch(
-                    "$name has size $(size(matrix)); expected $expected_size",
-                ))
-            permutedims(matrix)
-        end
-    end
-
-    uncertainty_names = (
-        "NuMu_flux_err",
-        "Nue_flux_err",
-        "AntiNuMu_flux_err",
-        "AntiNue_flux_err",
-    )
-    uncertainties = if all(name -> haskey(raw, name), uncertainty_names)
-        converted = map(uncertainty_names) do name
-            matrix = Float64.(raw[name])
-            size(matrix) == (length(cosθgrid), length(energies)) ||
-                throw(DimensionMismatch("invalid uncertainty size for $name"))
-            permutedims(matrix)
-        end
-        (νμ=converted[1], νe=converted[2],
-         antiνμ=converted[3], antiνe=converted[4])
-    else
-        nothing
-    end
-
-    return (
-        model=model,
-        energies=energies,
-        cosθgrid=cosθgrid,
-        νμ=matrices[1],
-        νe=matrices[2],
-        antiνμ=matrices[3],
-        antiνe=matrices[4],
-        uncertainties=uncertainties,
-    )
-end
-
-
-
-function _cached_neutrino_flux(config::AbstractDict)
-    binning = (
-        energies=config["energies"],
-        cosθgrid=config["cosθgrid"],
-    )
-    table = produce_neutrino_flux(
-        binning;
-        model=config["model"],
-        params=config["params"],
-    )
-    # DrWatson's metadata/tagging layer requires an AbstractDict. Keep that
-    # implementation detail inside the cache and expose only the named tuple.
-    return Dict{String,Any}("table" => table)
-end
-
