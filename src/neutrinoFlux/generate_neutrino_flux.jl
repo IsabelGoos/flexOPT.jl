@@ -740,27 +740,27 @@ end
 # ============================================================================
 
 """
-    _get_interpolated_flux(Phi_orig, E_orig, cosθ_orig, model, bin_centers_arrays)
+    _get_interpolated_flux(F_orig, E_orig, cosθ_orig, model, bin_centers_arrays)
 
 Interpolate a flux table onto a new binning.
 
-`Phi_orig` is a matrix defined on the original grid `(E_orig, cosθ_orig)`.
+`F_orig` is a matrix defined on the original grid `(E_orig, cosθ_orig)`.
 It is interpolated onto the grid `(E_new, cosθ_new)` given by `bin_centers_arrays`.
 
 The interpolation is linear in `log(E)` and `log(Phi)` and linear in `cosθ`.
 
 # Arguments
-- `Phi_orig::AbstractMatrix{<:Real}`: flux table.
+- `F_orig::AbstractMatrix{<:Real}`: flux table.
 - `E_orig::AbstractVector{<:Real}`: energies of the original table, in GeV.
 - `cosθ_orig::AbstractVector{<:Real}`: cosθ values of the original table
-  (ascending or descending, in the same order as the columns of `Phi_orig`).
+  (ascending or descending, in the same order as the columns of `F_orig`).
 - `model::Symbol`: atmospheric neutrino flux model used.
 - `bin_centers_arrays::NTuple{2, AbstractVector{<:Real}}`: new binning `(E_new, cosθ_new)`.
 
 # Returns
 A matrix of size `length(E_new) × length(cosθ_new)`.
 """
-function _get_interpolated_flux(Phi_orig::AbstractMatrix{<:Real}, 
+function _get_interpolated_flux(F_orig::AbstractMatrix{<:Real}, 
                                 E_orig::AbstractVector{<:Real}, 
                                 cosθ_orig::AbstractVector{<:Real}, 
                                 model::Symbol, 
@@ -774,13 +774,13 @@ function _get_interpolated_flux(Phi_orig::AbstractMatrix{<:Real},
     # The interpolation nodes must be in ascending order.
     order     = sortperm(cosθ_orig)
     cosθ_orig = cosθ_orig[order]
-    Phi_orig  = Phi_orig[:, order]
+    F_orig    = F_orig[:, order]
 
     # Interpolate in log-log space for energy and flux. Atmospheric neutrino
     # spectra fall roughly as a power law in terms of energy. 
-    logE_orig   = log.(E_orig)
-    logPhi_orig = log.(Phi_orig)
-    itp = linear_interpolation((logE_orig, cosθ_orig), logPhi_orig;
+    logE_orig = log.(E_orig)
+    logF_orig = log.(F_orig)
+    itp = linear_interpolation((logE_orig, cosθ_orig), logF_orig;
                                extrapolation_bc = Flat())
 
     # Evaluate on the new grid and go back from log(Phi) to Phi.
@@ -788,7 +788,7 @@ function _get_interpolated_flux(Phi_orig::AbstractMatrix{<:Real},
     return Phi_new
 end
 
-function _get_interpolated_flux(Phi_orig::AbstractArray{<:Real, 3},
+function _get_interpolated_flux(F_orig::AbstractArray{<:Real, 3},
                                 E_orig::AbstractVector{<:Real},
                                 cosθ_orig::AbstractVector{<:Real},
                                 ϕ_orig::AbstractVector{<:Real},        
@@ -805,12 +805,12 @@ function _get_interpolated_flux(Phi_orig::AbstractArray{<:Real, 3},
     oϕ        = sortperm(ϕ_orig)
     cosθ_orig = cosθ_orig[ocosθ]
     ϕ_orig    = ϕ_orig[oϕ]
-    Phi_orig  = Phi_orig[:, ocosθ, oϕ]
+    F_orig    = F_orig[:, ocosθ, oϕ]
 
     # ϕ is periodic (360°): pad one bin on each side so that interpolation
     # between the last and first bin wraps around instead of being flat.
     ϕ_ext   = vcat(ϕ_orig[end] - 360, ϕ_orig, ϕ_orig[1] + 360)
-    Phi_ext = cat(Phi_orig[:, :, end:end], Phi_orig, Phi_orig[:, :, 1:1]; dims = 3)
+    Phi_ext = cat(F_orig[:, :, end:end], F_orig, F_orig[:, :, 1:1]; dims = 3)
 
     # Interpolate in log-log space for energy and flux, linearly in cosθ and ϕ.
     logE_orig   = log.(E_orig)
@@ -855,66 +855,6 @@ _require_pythoncall() = Base.require(_PYTHONCALL_PKGID)
 
 
 
-
-
-
-
-
-
-
-
-"""
-    prefetch_daemonflux_data!(; retries=3, retry_delay=2)
-
-Download, cache and validate the official Daemonflux IceCube spline and
-calibration assets before a long computation. Existing cached files are reused.
-This is optional because Daemonflux also initializes lazily on first use.
-"""
-function prefetch_daemonflux_data!(;
-    retries::Integer=3,
-    retry_delay::Real=2,
-)
-    pythoncall = _require_pythoncall()
-    return Base.invokelatest(
-        _prefetch_daemonflux_data!,
-        pythoncall;
-        retries=retries,
-        retry_delay=retry_delay,
-    )
-end
-
-function _prefetch_daemonflux_data!(
-    pythoncall::Module;
-    retries::Integer=3,
-    retry_delay::Real=2,
-)
-    flux = _daemonflux_instance(
-        pythoncall;
-        retries=retries,
-        retry_delay=retry_delay,
-    )
-    parameter_count = length(
-        pythoncall.pyconvert(Vector{String}, flux.params.known_parameters),
-    )
-    return (
-        model=:Daemonflux,
-        location=:IceCube,
-        ready=true,
-        parameter_count=parameter_count,
-    )
-end
-
-
-"""
-    NeutrinoFluxTable
-
-Named-tuple flux table evaluated on the exact flexOPT binning. Every matrix has
-shape `(length(energies), length(cosθgrid))`, matching the first two dimensions
-of the oscillation-probability arrays.
-"""
-const NeutrinoFluxTable = NamedTuple{
-    (:model, :energies, :cosθgrid, :νμ, :νe, :antiνμ, :antiνe, :uncertainties),
-}
 
 
 function _resample_honda_flux(
@@ -1066,105 +1006,4 @@ function produce_or_load_neutrino_flux(
         error("invalid neutrino-flux cache entry: missing \"table\"")
     return cached["table"]
 end
-
-function _flux_component(table::NeutrinoFluxTable, flavor::Symbol)
-    aliases = (
-        νe=:νe,
-        nue=:νe,
-        νμ=:νμ,
-        numu=:νμ,
-        antiνe=:antiνe,
-        antinue=:antiνe,
-        antiνμ=:antiνμ,
-        antinumu=:antiνμ,
-    )
-    hasproperty(aliases, flavor) ||
-        throw(ArgumentError(
-            "unknown flavor $flavor; use :νe, :νμ, :antiνe or :antiνμ",
-        ))
-    canonical = getproperty(aliases, flavor)
-    return getproperty(table, canonical)
-end
-
-"""
-    plot_neutrino_flux_spectra(table; energy_power=3, angular=:mean)
-
-Create a Makie figure of the four atmospheric-flux spectra. `angular` may be
-`:mean` or `:sum`; the former is independent of the number of angular bins.
-"""
-function plot_neutrino_flux_spectra(
-    table::NeutrinoFluxTable;
-    energy_power::Real=3,
-    angular::Symbol=:mean,
-)
-    angular in (:mean, :sum) ||
-        throw(ArgumentError("angular must be :mean or :sum"))
-    reduce_angles = angular === :mean ?
-                    matrix -> vec(sum(matrix; dims=2)) ./ size(matrix, 2) :
-                    matrix -> vec(sum(matrix; dims=2))
-    figure = Figure()
-    axis = Axis(
-        figure[1, 1];
-        xscale=log10,
-        yscale=log10,
-        xlabel="E / GeV",
-        ylabel="ϕ E^$(energy_power)",
-    )
-    scale = table.energies .^ energy_power
-    for (field, label) in (
-        (:νe, "νₑ"),
-        (:νμ, "νμ"),
-        (:antiνe, "ν̄ₑ"),
-        (:antiνμ, "ν̄μ"),
-    )
-        lines!(
-            axis,
-            table.energies,
-            scale .* reduce_angles(getproperty(table, field));
-            label=label,
-        )
-    end
-    axislegend(axis; position=:lb)
-    return (; figure, axis)
-end
-
-"""
-    plot_neutrino_flux_heatmap(table; flavor=:νμ, logscale=true)
-
-Create a Makie `(energy, cosθ)` heatmap for one flavor. The returned named
-tuple contains `figure`, `axis`, `plot` and `colorbar`.
-"""
-function plot_neutrino_flux_heatmap(
-    table::NeutrinoFluxTable;
-    flavor::Symbol=:νμ,
-    logscale::Bool=true,
-)
-    values = _flux_component(table, flavor)
-    plotted = logscale ? log10.(max.(values, floatmin(Float64))) : values
-    figure = Figure()
-    axis = Axis(
-        figure[1, 1];
-        xlabel="log₁₀(E / GeV)",
-        ylabel="cosθ",
-        title=string(flavor),
-    )
-    heatmap_plot = heatmap!(
-        axis,
-        log10.(table.energies),
-        table.cosθgrid,
-        plotted,
-    )
-    colorbar = Colorbar(
-        figure[1, 2],
-        heatmap_plot;
-        label=logscale ? "log₁₀(ϕ)" : "ϕ",
-    )
-    return (; figure, axis, plot=heatmap_plot, colorbar)
-end
-
-
-
-
-
-
 
