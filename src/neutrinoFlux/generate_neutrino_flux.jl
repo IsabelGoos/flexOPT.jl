@@ -856,38 +856,6 @@ _require_pythoncall() = Base.require(_PYTHONCALL_PKGID)
 
 
 
-
-function _resample_honda_flux(
-    raw_flux,
-    native_energies,
-    native_cosθ,
-    target_energies,
-    target_cosθ,
-)
-    flux = Float64.(raw_flux)
-    energies = Float64.(collect(native_energies))
-    cosines = Float64.(collect(native_cosθ))
-    size(flux) == (length(cosines), length(energies)) ||
-        throw(DimensionMismatch(
-            "Honda flux size must be (cosθ, energy); got $(size(flux))",
-        ))
-    all(>(0), energies) ||
-        throw(ArgumentError("Honda energy coordinates must be positive"))
-
-    # Interpolate log(flux) over (log(E), cosθ) to preserve positivity and the
-    # many-decade energy dependence.
-    log_flux = log.(max.(permutedims(flux), floatmin(Float64)))
-    interpolator = LinearInterpolation(
-        (log.(energies), cosines),
-        log_flux;
-        extrapolation_bc=Flat(),
-    )
-    return [
-        exp(interpolator(log(energy), cosine))
-        for energy in target_energies, cosine in target_cosθ
-    ]
-end
-
 function _flux_table_from_raw(
     raw::AbstractDict,
     binning::NamedTuple,
