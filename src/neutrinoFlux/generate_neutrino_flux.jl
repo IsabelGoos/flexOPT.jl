@@ -149,6 +149,62 @@ function produce_neutrino_flux(user_params::Dict{String, Any})
     return nuflux
 end
 
+"""
+    produce_or_load_neutrino_flux(bin_centers_arrays;
+        directory="neutrinoFlux", prefix="flux")
+
+Load a previously generated flux table, or generate it and cache it with
+`myProduceOrLoad`.
+
+# Arguments
+- `bin_centers_arrays::NamedTuple`: two real-valued vectors named `energies`
+  and `cosθgrid`.
+
+# Keyword arguments
+- `directory::AbstractString`: folder holding the cache files.
+- `prefix::AbstractString`: prefix of the cache file names.
+
+The default model and its parameters are used. The cache key contains the complete binning, the
+model and the typed parameter set, so changing any of them triggers a new
+computation. The returned value is the same `NeutrinoFluxTable` named tuple
+as [`produce_neutrino_flux`](@ref).
+"""
+function produce_or_load_neutrino_flux(
+    bin_centers_arrays::NamedTuple{names, <:NTuple{2, AbstractVector{<:Real}}};
+    directory::String="neutrinoFlux",
+    prefix::String="flux",
+) where {names}
+
+    # Read the globally selected model and its matching parameter type.
+    model       = DEFAULT_NUFLUX_MODEL[]
+    params_type = MODEL_2_PARAMSTYPE[model] 
+    params      = params_type()   
+    # Validate the grids.
+    validated_binning = _validate_flux_binning(bin_centers_arrays)
+
+    # Everything that determines the flux goes into the cache key.
+    config_dict = Dict{String,Any}(
+        "model"    => model,
+        "params"   => params,
+        "energies" => validated_binning.energies,
+        "cosθgrid" => validated_binning.cosθgrid,
+    )
+ 
+    # Load from disk if an entry with this config exists; otherwise compute
+    # it with `_cached_neutrino_flux` and store it.
+    cached = myProduceOrLoad(
+        _cached_neutrino_flux,
+        config_dict,
+        directory,
+        prefix,
+    )
+
+    # Guard against stale or corrupted cache files.
+    haskey(cached, "table") ||
+        error("invalid neutrino-flux cache entry: missing \"table\"")
+    return cached["table"]
+end
+
 # ============================================================================
 # Validation methods
 # ============================================================================
@@ -936,42 +992,5 @@ function _cached_neutrino_flux(config::AbstractDict)
     # DrWatson's metadata/tagging layer requires an AbstractDict. Keep that
     # implementation detail inside the cache and expose only the named tuple.
     return Dict{String,Any}("table" => table)
-end
-
-"""
-    produce_or_load_neutrino_flux(binning;
-        model=DEFAULT_NUFLUX_MODEL[], params=DEFAULT_NUFLUX_PARAMS[],
-        directory="neutrinoFlux", prefix="flux")
-
-Load a previously generated flux table or generate and cache it with
-`commonBatchs.myProduceOrLoad`. The cache key contains the complete binning,
-backend and typed parameter set. The returned value is the same
-`NeutrinoFluxTable` named tuple as [`produce_neutrino_flux`](@ref).
-"""
-function produce_or_load_neutrino_flux(
-    binning::NamedTuple;
-    model::Symbol=DEFAULT_NUFLUX_MODEL[],
-    params::NeutrinoFluxParameters=DEFAULT_NUFLUX_PARAMS[],
-    directory::AbstractString="neutrinoFlux",
-    prefix::AbstractString="flux",
-)
-    validated_binning = _validate_flux_binning(binning)
-    selected_model = _validate_neutrino_flux_model(model)
-    selected_params = _validate_neutrino_flux_parameters(params)
-    config = Dict{String,Any}(
-        "model" => selected_model,
-        "params" => selected_params,
-        "energies" => validated_binning.energies,
-        "cosθgrid" => validated_binning.cosθgrid,
-    )
-    cached = myProduceOrLoad(
-        _cached_neutrino_flux,
-        config,
-        String(directory),
-        String(prefix),
-    )
-    haskey(cached, "table") ||
-        error("invalid neutrino-flux cache entry: missing \"table\"")
-    return cached["table"]
 end
 
