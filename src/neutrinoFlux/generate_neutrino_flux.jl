@@ -836,37 +836,11 @@ _require_pythoncall() = Base.require(_PYTHONCALL_PKGID)
 
 
 
-function _daemonflux_instance(
-    pythoncall::Module;
-    retries::Integer=3,
-    retry_delay::Real=2,
-)
-    retries >= 1 || throw(ArgumentError("retries must be at least 1"))
-    daemonflux = pythoncall.pyimport("daemonflux")
-    for attempt in 1:retries
-        try
-            return daemonflux.Flux(
-                location="IceCube",
-                use_calibration=true,
-                debug=1,
-            )
-        catch error
-            if attempt == retries
-                message = sprint(showerror, error)
-                throw(ErrorException(
-                    "Daemonflux could not initialize its IceCube data after " *
-                    "$retries attempts. Its official GitHub release assets may " *
-                    "be temporarily unreachable. Check access to github.com and " *
-                    "release-assets.githubusercontent.com, then call " *
-                    "`prefetch_daemonflux_data!()` or retry the computation.\n" *
-                    "Last Python error:\n$message",
-                ))
-            end
-            sleep(retry_delay * 2.0^(attempt - 1))
-        end
-    end
-    error("unreachable")
-end
+
+
+
+
+
 
 """
     prefetch_daemonflux_data!(; retries=3, retry_delay=2)
